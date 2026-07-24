@@ -1,0 +1,76 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "study_sample",
+  "steps": [
+    {
+      "file": "crystalformer/src/study_sample.py",
+      "selection": {
+        "start": {
+          "line": 15,
+          "character": 20
+        },
+        "end": {
+          "line": 15,
+          "character": 38
+        }
+      },
+      "description": "这里就是对坐标进行对称操作得到等价的操作op是操作矩阵形状是(3,4),用四维是因为这样就不仅能表示旋转对称性还能表示平移对称性\n\njnp.array([*x, 1])是表示在x的最后一个维度加上一个1\n\njnp.floor是向下取整把坐标限制到[0,1)。"
+    },
+    {
+      "file": "crystalformer/src/study_sample.py",
+      "selection": {
+        "start": {
+          "line": 30,
+          "character": 1
+        },
+        "end": {
+          "line": 49,
+          "character": 19
+        }
+      },
+      "description": "这段代码挺有设计感的\n\n注意这里我全都是在对指标进行操作，所以我并没有对原始的数据进行排列，但是我在原始的数据顺序之下把不需要的给剔除了\n\n核心在于理解logit[batch_idx,indices]这里batch_idx和indices都是二维的数组，首先batch_idx先进行广播规则，这时候logit,batch_idx,indices的形状就都是一样的了，然后在logit的形状的每一个位置上，我会得到一个坐标\n\n第一维是batch_idx在这个相同位置上的值，\n\n第二维是indices在相同位置上的值"
+    },
+    {
+      "file": "crystalformer/src/study_sample.py",
+      "selection": {
+        "start": {
+          "line": 150,
+          "character": 1
+        },
+        "end": {
+          "line": 156,
+          "character": 109
+        }
+      },
+      "description": "初始化\n"
+    },
+    {
+      "file": "crystalformer/src/study_sample.py",
+      "selection": {
+        "start": {
+          "line": 159,
+          "character": 1
+        },
+        "end": {
+          "line": 181,
+          "character": 1
+        }
+      },
+      "description": "先采样g"
+    },
+    {
+      "file": "crystalformer/src/study_sample.py",
+      "selection": {
+        "start": {
+          "line": 182,
+          "character": 1
+        },
+        "end": {
+          "line": 182,
+          "character": 110
+        }
+      },
+      "description": "采样(w-A-X-Y-Z-L)_n,如前所述，采样L是因为batch里面的采样不一定在同一位置结束，我们每一轮都要保留一份晶格的信息\n"
+    }
+  ]
+}

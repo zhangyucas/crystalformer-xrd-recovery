@@ -171,11 +171,14 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1):
     try: cif_strings = data['cif']
     except: cif_strings = data['structure']
 
-    p = multiprocessing.Pool(num_workers)
     partial_process_one = partial(process_one, atom_types=atom_types, wyck_types=wyck_types, n_max=n_max)
-    results = p.map_async(partial_process_one, cif_strings).get()
-    p.close()
-    p.join()
+    if num_workers == 1:
+        results = list(map(partial_process_one, cif_strings))
+    else:
+        p = multiprocessing.Pool(num_workers)
+        results = p.map_async(partial_process_one, cif_strings).get()
+        p.close()
+        p.join()
 
     G, L, XYZ, A, W = zip(*results)
 
@@ -269,5 +272,4 @@ if __name__=='__main__':
 
         print (formula)
         print (composition[i])
-
 

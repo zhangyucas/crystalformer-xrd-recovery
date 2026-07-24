@@ -1,0 +1,175 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "transformer tutor",
+  "steps": [
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 18,
+          "character": 1
+        },
+        "end": {
+          "line": 25,
+          "character": 1
+        }
+      },
+      "description": "对hx，hy，hz进行renormalize\n\n先拆分单独处理，再合并一起输出\n\nlogit用softmax归一化然后取log\n\nkappa用softplus保证其为正数\n\nloc不变"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 51,
+          "character": 1
+        },
+        "end": {
+          "line": 63,
+          "character": 91
+        }
+      },
+      "description": "这儿就是embedding，为每一个token都创建embed_size那么多个参数\n\n注意c_embedding代表的是化学式的embedding，如果给定了化学式就把对应的元素的embedding按照化学式的数字加进来就行，如果没给化学式就单独定义一个embedding"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 65,
+          "character": 1
+        },
+        "end": {
+          "line": 83,
+          "character": 73
+        }
+      },
+      "description": "c_embedding通过一个简单的MLP得到得到g_logit（空间群的概率分布函数）\n\nc_embedding和g_embedding通过一个简单的MLP得到w_logit（wyckoff位置的概率分布函数）\n\n其中w_logit进行了一个mask（0 < 编号 <= w_max），不同的空间群有不同的w_max，限制只能是当前空间群的wyckoff位置"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 85,
+          "character": 1
+        },
+        "end": {
+          "line": 87,
+          "character": 29
+        }
+      },
+      "description": "h0只负责预测第一个原子的wyckoff位置，真正的顺序是g-（-w-A-XYZ-）_n-L,g_logit和w_logit就是预测的最前面的两个"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 89,
+          "character": 1
+        },
+        "end": {
+          "line": 123,
+          "character": 78
+        }
+      },
+      "description": "回忆一下transformer的原理，我的embedding本身不会变，我是通过改变qkv来调整我的模型参数的\n\nc_embedding和g_embedding是waxyz都需要的，而且在各个原子位置都是完全一样的\n\nxyz都加上了自己的位置信息，通过傅里叶变换展开成频率了\n"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 151,
+          "character": 13
+        },
+        "end": {
+          "line": 151,
+          "character": 36
+        }
+      },
+      "description": "层归一化"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 152,
+          "character": 12
+        },
+        "end": {
+          "line": 153,
+          "character": 62
+        }
+      },
+      "description": "QKV训练，这儿直接就进行了对注意力分数矩阵（QK^T）进行了mask，然后我得到的结果和h_atten和h_norm的形状是一样的"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 154,
+          "character": 12
+        },
+        "end": {
+          "line": 156,
+          "character": 37
+        }
+      },
+      "description": "dropout加上residual"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 158,
+          "character": 13
+        },
+        "end": {
+          "line": 166,
+          "character": 28
+        }
+      },
+      "description": "MLP加上非线性性然后再归一化和dropout和residual"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 184,
+          "character": 1
+        },
+        "end": {
+          "line": 192,
+          "character": 89
+        }
+      },
+      "description": "我们这儿进行对w的第一个mask，我们人为规定一个w的顺序，必须是从小到大的，而且当前wyckoff位置没有自由度的话下一个必须是严格递增的\n注意这儿的[w_mask,:](shape(n,wyck_type))代表的都是对下一个位置的mask。总共有两种情况\n\n如果当前wyckoff位置有自由度的话就mask掉所有小于当前位置值的所有值\n\n如果当前wyckoff位置没有自由度的话就mask掉所有小于等于当前位置的所有值\n\n对于所有位置都可以出现第一种wyckoff位置（即pad）也就是加上一个全0的数组\n\n补充一下，这儿w_mask_less_equal和w_mask_less的构造用到了一个广播规则，其中arrange的数列的shape是（1，wyck_type），而我的w的shape是（n,1）\n\n所以最后会出来一个这样的数组，其中T是要被mask掉的（less_euqal）\n\n             候选：1  2  3  4  5\n当前 W[0]=2        T  T  F  F  F\n当前 W[1]=4        T  T  T  T  F"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 207,
+          "character": 1
+        },
+        "end": {
+          "line": 213,
+          "character": 1
+        }
+      },
+      "description": "注意这里是用w（shape（n,1），代表每个原子位置的真实的wyckoff位置编号）去mask atom\n\nn个不等价原子的位置中\n\nw>0的地方把第一个原子种类（第一列）全部mask\n\nw==0的地方把所有真实的原子种类（后面repeat的atom_type-1列）全部mask掉"
+    },
+    {
+      "file": "crystalformer/src/study_transformer.py",
+      "selection": {
+        "start": {
+          "line": 231,
+          "character": 1
+        },
+        "end": {
+          "line": 244,
+          "character": 9
+        }
+      },
+      "description": "这儿其实只是把l的各个部分拆出来然后对l_logit用一个归一化，sigma用一个softplus保证正数，trivial的操作"
+    }
+  ],
+  "ref": "main"
+}

@@ -71,16 +71,27 @@ def configure_jax_platform(platform):
 parser = argparse.ArgumentParser(description='')
 
 group = parser.add_argument_group('training parameters')
-group.add_argument('--epochs', type=int, default=10000, help='')
-group.add_argument('--batchsize', type=int, default=100, help='')
-group.add_argument('--lr', type=float, default=1e-4, help='learning rate')
-group.add_argument('--lr_decay', type=float, default=0.0, help='lr decay')
-group.add_argument('--weight_decay', type=float, default=0.0, help='weight decay')
-group.add_argument('--clip_grad', type=float, default=1.0, help='clip gradient')
-group.add_argument("--optimizer", type=str, default="adam", choices=["none", "adam", "adamw"], help="optimizer type")
-group.add_argument("--val_interval", type=int, default=100, help="validation interval")
+group.add_argument('--epochs', type=int, default=10000, help='') #我要梯度下降多少轮
+group.add_argument('--batchsize', type=int, default=100, help='') #每个batch包含多少个样本
+group.add_argument('--lr', type=float, default=1e-4, help='learning rate') #学习率
+group.add_argument('--lr_decay', type=float, default=0.0, help='lr decay') #学习率衰减 因为我的越接近真实值梯度变化应越小，为了防止震荡，我们就让梯度的幅度慢慢变小
+group.add_argument('--weight_decay', type=float, default=0.0, help='weight decay') #权重衰减，adamw的时候用到
+group.add_argument('--clip_grad', type=float, default=1.0, help='clip gradient') #梯度裁剪	adam：全局梯度修剪：限制模长 adamw：元素梯度修剪，限制每个分量
+group.add_argument("--optimizer", type=str, default="adam", choices=["none", "adam", "adamw"], help="optimizer type") #adam和adamw，adam是运用到了梯度的关系（保留一部分之前的一阶矩和二阶矩）为了防止梯度变化的太快，adamw再次之上还有一点点小优化
+group.add_argument("--val_interval", type=int, default=100, help="validation interval") #每个比如100个epoch做一下记录作为日志
 group.add_argument("--cfg_drop_prob", type=float, default=0.5, help="classifer-free guidance drop probability")
 
+"""
+cfg_drop_prob:有一定的概率把输入的化学式给mask掉,
+	一部分样本：
+	input = 化学式 composition + 晶体结构前文
+	target = 晶体结构中的下一个变量
+	
+	另一部分样本：
+	input = 空 composition + 晶体结构前文
+	target = 晶体结构中的下一个变量
+
+"""
 group.add_argument("--folder", default=project_path("data"), help="the folder to save data")
 group.add_argument("--restore_path", default=None, help="checkpoint path or file")
 
@@ -88,20 +99,20 @@ group = parser.add_argument_group('runtime parameters')
 group.add_argument("--platform", default="auto", choices=["auto", "cpu", "gpu"], help="JAX platform to use")
 
 group = parser.add_argument_group('dataset')
-group.add_argument('--train_path', default=project_path("data", "mini.csv"), help='') #train用来训练
-group.add_argument('--valid_path', default=project_path("data", "mini.csv"), help='') #训练过程中用来检查模型效果
+group.add_argument('--train_path', default=project_path("data", "mini.csv"), help='') #train用来训
+group.add_argument('--valid_path', default=project_path("data", "mini.csv"), help='')  #训练过程中用来检查模型效果
 group.add_argument('--test_path', default=project_path("data", "mini.csv"), help='') #训练完成之后用来最终评估模型的表现
 
 group = parser.add_argument_group('transformer parameters')
 group.add_argument('--Nf', type=int, default=5, help='number of frequencies for fc')
 group.add_argument('--Kx', type=int, default=16, help='number of modes in x')
 group.add_argument('--Kl', type=int, default=4, help='number of modes in lattice')
-group.add_argument('--h0_size', type=int, default=256, help='hidden layer dimension for the g and w of first atom')
+group.add_argument('--h0_size', type=int, default=256, help='hidden layer dimension for the g and w of first atom') #g是空间群 w是wyckoff位置
 group.add_argument('--transformer_layers', type=int, default=16, help='The number of layers in transformer')
 group.add_argument('--num_heads', type=int, default=8, help='The number of heads')
-group.add_argument('--key_size', type=int, default=32, help='The key size')
+group.add_argument('--key_size', type=int, default=32, help='The key size') #query和key的维度
 group.add_argument('--model_size', type=int, default=256, help='The model size')
-group.add_argument('--embed_size', type=int, default=256, help='The enbedding size')
+group.add_argument('--embed_size', type=int, default=256, help='The enbedding size') #embedding vector的维度
 group.add_argument('--dropout_rate', type=float, default=0.1, help='The dropout rate for MLP')
 group.add_argument('--attn_dropout', type=float, default=0.1, help='The dropout rate for attention')
 
@@ -110,9 +121,16 @@ group.add_argument("--lamb_a", type=float, default=1.0, help="weight for the a p
 group.add_argument("--lamb_w", type=float, default=1.0, help="weight for the w part relative to fc")
 group.add_argument("--lamb_l", type=float, default=1.0, help="weight for the lattice part relative to fc")
 
+"""
+G       空间群
+W       Wyckoff 位置
+A       原子类型
+XYZ     分数坐标
+L       晶格参数"""
+
 group = parser.add_argument_group('physics parameters')
 group.add_argument('--n_max', type=int, default=21, help='The maximum number of atoms in the cell')
-group.add_argument('--atom_types', type=int, default=119, help='Atom types including the padded atoms')
+group.add_argument('--atom_types', type=int, default=119, help='Atom types including the padded atoms') #padding用来把所有所有晶体结构补齐到同一个长度
 group.add_argument('--wyck_types', type=int, default=28, help='Number of possible multiplicites including 0')
 
 group = parser.add_argument_group('sampling parameters')
@@ -124,7 +142,7 @@ group.add_argument('--temperature', type=float, default=1.0, help='temperature u
 group.add_argument('--K', type=int, default=30, help='top K number of space groups. 0 means we sample spacegroup')
 group.add_argument('--spacegroup', type=int, default=None, help='the spacegroup number 1-230, given that will overwrites K')
 group.add_argument('--num_samples', type=int, default=10, help='number of generated samples')
-group.add_argument('--num_io_process', type=int, default=40, help='number of process used in multiprocessing io')
+group.add_argument('--num_io_process', type=int, default=40, help='number of process used in multiprocessing io') #并行处理读写的进程的数目
 group.add_argument('--save_path', type=str, default=None, help='path to save the sampled structures')
 group.add_argument('--output_filename', type=str, default='output.csv', help='outfile to save sampled structures')
 group.add_argument('--verbose', type=int, default=0, help='verbose level')
@@ -189,7 +207,7 @@ else:
         if len(idx) > args.n_max:
             raise ValueError("--wyckoff cannot contain more entries than --n_max")
         # padding 0 until the length is args.n_max
-        w_mask = idx + [0]*(args.n_max -len(idx)) #列表和列表相加是拼接，列表乘以一个数字式重复自己
+        w_mask = idx + [0]*(args.n_max -len(idx))
         # w_mask = [1 if w in idx else 0 for w in range(1, args.wyck_types+1)]
         w_mask = jnp.array(w_mask, dtype=int)
         print ('sampling structure formed by these Wyckoff positions:', args.wyckoff)
@@ -206,7 +224,7 @@ params, transformer = make_transformer(key, args.Nf, args.Kx, args.Kl, args.n_ma
                                       args.dropout_rate, args.attn_dropout)
 transformer_name = 'Nf_%d_Kx_%d_Kl_%d_h0_%d_l_%d_H_%d_k_%d_m_%d_e_%d_drop_%g_%g'%(args.Nf, args.Kx, args.Kl, args.h0_size, args.transformer_layers, args.num_heads, args.key_size, args.model_size, args.embed_size, args.dropout_rate, args.attn_dropout)
 
-print ("# of transformer params", ravel_pytree(params)[0].size) 
+print ("# of transformer params", ravel_pytree(params)[0].size) #把pytree的结构给展平，返回两个值，第一个是展平之后的结果，第二个是用来回复pytree结构的一个callable的向量
 
 ################### Train #############################
 
@@ -247,10 +265,10 @@ if args.optimizer != "none":
     schedule = lambda t: args.lr/(1+args.lr_decay*t)
 
     if args.optimizer == "adam":
-        optimizer = optax.chain(optax.clip_by_global_norm(args.clip_grad), 
-                                optax.scale_by_adam(), 
-                                optax.scale_by_schedule(schedule), 
-                                optax.scale(-1.))
+        optimizer = optax.chain(optax.clip_by_global_norm(args.clip_grad), #全局裁剪梯度
+                                optax.scale_by_adam(),  #运用adam的算法
+                                optax.scale_by_schedule(schedule),  #乘以学习率
+                                optax.scale(-1.)) #反一个方向
     elif args.optimizer == 'adamw':
         optimizer = optax.chain(optax.clip(args.clip_grad),
                                 optax.adamw(learning_rate=schedule, weight_decay=args.weight_decay)
@@ -284,7 +302,7 @@ else:
         print ('targeting spacegroup No.', args.spacegroup)
 
     sample_crystal = make_sample_crystal(transformer, args.n_max, args.atom_types, args.wyck_types, args.Kx, args.Kl, w_mask, args.top_p, args.temperature, args.K, args.spacegroup, atom_mask)
-
+    # 这里返回是jitwrapped，是一个可以被jit编译的静态的对象，提高采样速度
     if args.seed is not None:
         key = jax.random.PRNGKey(args.seed) # reset key for sampling if seed is provided
 
@@ -297,7 +315,7 @@ else:
     )
     for batch_idx in range(num_batches):
         start_idx = batch_idx * args.batchsize
-        end_idx = min(start_idx + args.batchsize, args.num_samples)
+        end_idx = min(start_idx + args.batchsize, args.num_samples) 
         n_sample = end_idx - start_idx
         key, subkey = jax.random.split(key)
         G, XYZ, A, W, M, L = sample_crystal(subkey, params, n_sample, composition)
@@ -339,7 +357,7 @@ else:
                 print (g, l)
 
         # Repeat composition to match the actual sampled batch size.
-        composition_batch = composition[None, :].repeat(n_sample, axis=0)
+        composition_batch = composition[None, :].repeat(n_sample, axis=0) #composition是119个元素的one-hot标记，这里先把他变成一个向量，再堆叠
         logp_g, logp_w, logp_xyz, logp_a, logp_l = jax.jit(logp_fn, static_argnums=8)(params, key, composition_batch, G, L, XYZ, A, W, False)
 
         data['logp_g'] = np.array(logp_g).tolist()
@@ -351,8 +369,8 @@ else:
         sample_logp = logp_g + logp_xyz + args.lamb_w*logp_w + args.lamb_a*logp_a + args.lamb_l*logp_l
         data['logp'] = np.array(sample_logp).tolist()
 
-        actual_compositions = jax.vmap(find_composition_vector)(A, M)
-        formula_match = jnp.all(actual_compositions == composition_batch, axis=1)
+        actual_compositions = jax.vmap(find_composition_vector)(A, M) #actual同样是长度为119，只不过取了一个GCD化成了最简形式
+        formula_match = jnp.all(actual_compositions == composition_batch, axis=1) #actual_compositions和composition_batch是两个长度为119的向量，formula_match是长度为batchsize的布尔向量，表示每个样本的实际化学式是否和目标化学式一致
 
         if args.verbose>0:
             idx = jnp.argsort(G[formula_match])

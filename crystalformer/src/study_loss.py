@@ -34,7 +34,7 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
         x_loc = loc.reshape(n_max, Kx)
         kappa = kappa.reshape(n_max, Kx)
         logp_x = jax.vmap(von_mises_logpdf, (None, 1, 1), 1)((X-0.5)*2*jnp.pi, loc, kappa) # (n_max, Kx)
-        logp_x = jax.scipy.special.logsumexp(x_logit + logp_x, axis=1) # (n_max, )
+        logp_x = jax.scipy.special.logsumexp(x_logit + logp_x, axis=1) # (n_max, ) x_logit 是当前分量的比例，当前的logp_x是每个kx里面算的概率
         logp_x = jnp.sum(jnp.where(fc_mask_x, logp_x, jnp.zeros_like(logp_x)))
 
         return logp_x
@@ -47,6 +47,7 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
         XYZ: (n_max, 3)
         A: (n_max,)
         W: (n_max,)
+        注意这里全都是被vmap切分之后的维度,按理来说上面是0的位置对应的shape应该都是(batch,:)
         '''
 
         num_sites = jnp.sum(A!=0)

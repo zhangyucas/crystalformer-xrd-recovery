@@ -20,8 +20,16 @@ classifiers = [
 ]
 dependencies = [
     "dm-haiku==0.0.15",
+    "jax>=0.4.34",
+    "numpy>=1.24",
     "optax==0.2.6",
+    "pandas>=2.0",
     "pyxtal==1.1.1"
+]
+
+[project.optional-dependencies]
+cuda12 = [
+    "jax[cuda12]>=0.4.34"
 ]
 
 [project.urls]

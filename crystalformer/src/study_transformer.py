@@ -11,14 +11,14 @@ from crystalformer.src.wyckoff import wmax_table, dof0_table
 
 def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key_size, model_size, embed_size, atom_types, wyck_types, dropout_rate, attn_dropout=0.1, widening_factor=4, sigmamin=1e-3):
     
-    coord_types = 3*Kx #这儿的3是指每个分数坐标的混合分布需要三组参数，权重，均值和集中度，所以xyz都各自有一个长度为coord_type的输出
-    lattice_types = Kl+2*6*Kl #晶格参数是一个六维的向量，这里同样是三个参数，只不过共享同一个权重
-    output_size = np.max(np.array([ atom_types+lattice_types, coord_types, wyck_types]))
+    coord_types = 3*Kx
+    lattice_types = Kl+2*6*Kl
+    output_size = np.max(np.array([atom_types+lattice_types, coord_types, wyck_types]))
 
-    def renormalize(h_x): #hx表示对x坐标预测的结果 hypothesis
+    def renormalize(h_x):
         n = h_x.shape[0]
         x_logit, x_loc, x_kappa = jnp.split(h_x[:, :coord_types], [Kx, 2*Kx], axis=-1)
-        x_logit -= jax.scipy.special.logsumexp(x_logit, axis=1)[:, None]  #softmax取对数
+        x_logit -= jax.scipy.special.logsumexp(x_logit, axis=1)[:, None] 
         x_kappa = jax.nn.softplus(x_kappa) 
         h_x = jnp.concatenate([x_logit, x_loc, x_kappa, jnp.zeros((n, output_size - coord_types))], axis=-1)  
         return h_x
@@ -34,7 +34,6 @@ def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key
             W: (n, )  wyckoff position index
             M: (n, )  multiplicities
             is_train: bool 
-            n: 原子个数
         Returns: 
             h: (5n+1, output_types)
         '''
@@ -130,7 +129,7 @@ def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key
                              hY[:, None, :],
                              hZ[:, None, :]
                              ], axis=1) # (n, 5, model_size)
-        h = h.reshape(5*n, -1)                                         # (5*n, model_size)
+        h = h.reshape(5*n, -1)                                         # (5*n, model_size) ((W-A-X-Y-Z)_n,model_size)
 
         # positional_embeddings = hk.get_parameter(
         #                 'positional_embeddings', [5*n_max, model_size], init=initializer)
@@ -154,7 +153,7 @@ def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key
                                 mask=mask, is_train=is_train)
             if is_train: 
                 h_attn = hk.dropout(hk.next_rng_key(), dropout_rate, h_attn)
-            h = h + h_attn
+            h = h + h_attn #residual
 
             dense_block = hk.Sequential([hk.Linear(widening_factor * model_size, w_init=initializer),
                                          jax.nn.gelu,
@@ -179,7 +178,7 @@ def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key
         
         # we now do all kinds of masks to a_logit and w_logit
         
-        a_logit = h_al[:, :atom_types]
+        a_logit = h_al[:, :atom_types] 
         w_logit = w_logit[:, :wyck_types]
         
         # (1) impose the constrain that W_0 <= W_1 <= W_2 
@@ -254,7 +253,7 @@ def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key
 
         h = jnp.concatenate( [h0, h], axis = 0) # (5*n+1, output_size)
 
-        return g_logit, h
+        return g_logit, h #g_logit是一开始就拿MLP算的那个损失函数，h是所有打包起来的hypothesis
  
     
     composition = jnp.zeros((atom_types,), dtype=int)

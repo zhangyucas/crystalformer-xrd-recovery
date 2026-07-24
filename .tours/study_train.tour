@@ -1,0 +1,48 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "study_train",
+  "steps": [
+    {
+      "file": "../../../home/zhangyu2402/CrystalFormer/crystalformer/src/study_train.py",
+      "selection": {
+        "start": {
+          "line": 13,
+          "character": 1
+        },
+        "end": {
+          "line": 14,
+          "character": 61
+        }
+      },
+      "description": "注意这儿pmap结构上和vmap差不多，只不过一个把数据分到不同的设别，一个分到不同的并行处理单元\n\n需要注意到是这儿两个地方都是默认的in_axes=0 output_axes=0，对于shard，它看似没用实际上把主句分到了不同设备上，让不同的设备去存储，也就是说我的数据本身没变，但是数据的存放位置变了"
+    },
+    {
+      "file": "crystalformer/src/study_train.py",
+      "selection": {
+        "start": {
+          "line": 17,
+          "character": 1
+        },
+        "end": {
+          "line": 29,
+          "character": 1
+        }
+      },
+      "description": "这儿人如其名，就是把数据分不到不同的设备上去\n\n首先保证这些数据必须要整除设备数量\n\n然后再把这个x（batchsize，……）拆成（num_device，dim_per_device，……）\n\n并把这些数据按照第0维分布到不同的设备上去"
+    },
+    {
+      "file": "crystalformer/src/study_train.py",
+      "selection": {
+        "start": {
+          "line": 67,
+          "character": 1
+        },
+        "end": {
+          "line": 68,
+          "character": 46
+        }
+      },
+      "description": "注意这儿params和opt_state是共享的，回顾所谓的batch梯度下降，就是同一个batch里面，有不同的样本，对相同的参数求导，然后取grad的平均"
+    }
+  ]
+}
