@@ -1,0 +1,11 @@
+target,method,requested,evaluated,mean_cosine,best_cosine,structure_matches,structure_match_denominator,top1_match
+simple_si,prior,40,40,0.141185,0.450072,0,40,false
+simple_si,ppo_batch8,40,40,0.149443,0.504783,0,40,false
+simple_si,random_move,40,40,,0.097692,0,1,false
+nacl_rock_salt,prior,80,80,0.138215,0.469789,79,80,true
+nacl_rock_salt,ppo_batch8,80,80,0.181079,0.571371,79,80,true
+nacl_rock_salt,random_move,80,80,,0.656109,0,1,false
+mgo_rock_salt,prior,80,9,0.051633,0.142385,0,9,false
+mgo_rock_salt,random_move,80,78,,0.307052,0,1,false
+kcl_rock_salt,prior,80,15,0.000050,0.000160,0,15,false
+kcl_rock_salt,random_move,80,80,,0.327658,0,1,false

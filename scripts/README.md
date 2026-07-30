@@ -11,6 +11,7 @@
   - [Embedding Visualization](#embedding-visualization)
   - [Stable, Unique and Novel Structures](#stable-unique-and-novel-structures)
   - [Structure Visualization](#structure-visualization)
+  - [Powder XRD Recovery](#powder-xrd-recovery)
 
 ### Transform
 `awl2struct.py` is a script to transform the generated `L, W, A, X` to the `cif` format. 
@@ -108,3 +109,31 @@ python check_sun_materials.py --restore_path RESTORE_PATH --filename FILENAME --
 
 ### Structure Visualization
 `structure_visualization.ipynb` is a notebook to visualize the generated structures.
+
+### Powder XRD Recovery
+The Issue #68 workflow is split into bounded, serial CPU commands:
+
+```bash
+python issue68_xrd_recovery/scripts/xrd_recovery.py target --cif KNOWN.cif --output TARGET.csv
+python issue68_xrd_recovery/scripts/xrd_recovery.py evaluate --target TARGET.csv --candidates CANDIDATE_DIR --output RESULTS.csv
+python issue68_xrd_recovery/scripts/xrd_recovery.py random-move --target TARGET.csv --formula Si --output-dir RANDOM_DIR --evaluations 500 --restarts 4
+python issue68_xrd_recovery/scripts/xrd_study.py make-commands --target TARGET.csv --formula Si --restore-path CHECKPOINT --output-root SWEEP --ground-truth KNOWN.cif
+python issue68_xrd_recovery/scripts/xrd_study.py summarize --runs SWEEP --output SWEEP/study
+```
+
+`xrd_recovery.py` accepts either a fixed-grid CSV or a target CIF for
+evaluation. The evaluator excludes run metadata JSON files, reports cosine
+similarity separately from `StructureMatcher`, and writes an empty summary
+instead of aborting when a bounded PPO run produced no valid CIF. The study
+command generator always emits CPU/preallocation guards and runs tau/seed
+values serially; see [XRD_STUDY.md](../issue68_xrd_recovery/reports/XRD_STUDY.md) for the hardware limits
+and verified smoke protocol.
+## WSL GPU bridge
+
+Codex's filesystem sandbox can hide WSL's `/dev/dxg` even when JAX works in a
+normal terminal. Run a GPU command through the host bridge while preserving
+the current directory and Python environment:
+
+```bash
+issue68_xrd_recovery/scripts/run_gpu_host.sh python -c 'import jax; print(jax.devices("gpu"))'
+```

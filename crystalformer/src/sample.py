@@ -61,7 +61,32 @@ def sample_x(key, h_x, Kx, top_p, temperature, batchsize):
     return key, x 
 
 
-def make_sample_crystal(transformer, n_max, atom_types, wyck_types, Kx, Kl, w_mask, top_p, temperature, K=0, g=None, atom_mask=None, spg_mask=None):
+def make_sample_crystal(
+    transformer,
+    n_max,
+    atom_types,
+    wyck_types,
+    Kx,
+    Kl,
+    w_mask,
+    top_p,
+    temperature,
+    K=0,
+    g=None,
+    atom_mask=None,
+    spg_mask=None,
+    sg_temperature=None,
+    sg_epsilon=0.0,
+):
+
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    if sg_temperature is None:
+        sg_temperature = temperature
+    if sg_temperature <= 0:
+        raise ValueError("sg_temperature must be positive")
+    if not 0.0 <= sg_epsilon <= 1.0:
+        raise ValueError("sg_epsilon must be in [0, 1]")
 
     if atom_mask is None:
         user_atom_mask = jnp.ones((atom_types,), dtype=bool)
@@ -164,10 +189,10 @@ def make_sample_crystal(transformer, n_max, atom_types, wyck_types, Kx, Kl, w_ma
 
         #jax.debug.print("g_logit {g_logit}", g_logit=g_logit)
             
-        if g is None: 
+        if g is None:
             if K == 0: 
                 key, subkey = jax.random.split(key)
-                G = sample_top_p(subkey, g_logit, top_p, temperature) + 1
+                G = sample_top_p(subkey, g_logit, top_p, sg_temperature) + 1
             else:
                 offset = 0
                 # sample top K spacegroups uniformly in offset+1 to 230
@@ -176,6 +201,21 @@ def make_sample_crystal(transformer, n_max, atom_types, wyck_types, Kx, Kl, w_ma
                 key, subkey = jax.random.split(key)
                 sampled_indices = jax.random.randint(subkey, (batchsize,), 0, K)
                 G = g_logits_topk[sampled_indices] + offset + 1  
+
+            # Optional epsilon-greedy exploration over all space groups that
+            # survived ``spg_mask``.  Keep the default path byte-for-byte
+            # compatible with the historical sampler and only split the extra
+            # keys when exploration is requested.
+            if sg_epsilon > 0.0:
+                key, explore_key, random_key = jax.random.split(key, 3)
+                allowed = g_logit > -1e9
+                uniform_logits = jnp.where(allowed, 0.0, -1e10)
+                random_g = jax.random.categorical(random_key, uniform_logits, axis=1) + 1
+                random_g = jnp.where(jnp.any(allowed, axis=1), random_g, G)
+                explore = jax.random.bernoulli(
+                    explore_key, p=sg_epsilon, shape=(batchsize,)
+                )
+                G = jnp.where(explore, random_g, G)
         else: # one has specified the space group
             G = jnp.zeros((batchsize,), dtype=int) + g
 

@@ -9,7 +9,7 @@ import numpy as np
 from crystalformer.src.attention import MultiHeadAttention
 from crystalformer.src.wyckoff import wmax_table, dof0_table
 
-def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key_size, model_size, embed_size, atom_types, wyck_types, dropout_rate, attn_dropout=0.1, widening_factor=4, sigmamin=1e-3):
+def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key_size, model_size, embed_size, atom_types, wyck_types, dropout_rate, attn_dropout=0.1, widening_factor=4, sigmamin=1e-3, initialize=True):
     
     coord_types = 3*Kx #这儿的3是指每个分数坐标的混合分布需要三组参数，权重，均值和集中度，所以xyz都各自有一个长度为coord_type的输出
     lattice_types = Kl+2*6*Kl #晶格参数是一个六维的向量，这里同样是三个参数，只不过共享同一个权重
@@ -264,7 +264,9 @@ def make_transformer(key, Nf, Kx, Kl, n_max, h0_size, num_layers, num_heads, key
     W = jnp.zeros((n_max, ), dtype=int) 
     M = jnp.zeros((n_max, ), dtype=int) 
 
-    params = network.init(key, composition, G, XYZ, A, W, M, True)
+    # Inference-only callers can load an existing parameter tree without first
+    # allocating a second, randomly initialized copy of the full model.
+    params = network.init(key, composition, G, XYZ, A, W, M, True) if initialize else None
     return params, network.apply
 
 def _layer_norm(x: jax.Array) -> jax.Array:

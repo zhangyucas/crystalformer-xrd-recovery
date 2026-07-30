@@ -9,3 +9,12 @@ experimental/
 build/
 !imgs/*.png
 .vscode/
+
+# Issue #68 generated artifacts: checkpoints, JAX caches, raw samples, and runs.
+issue68_xrd_recovery/experiments/**
+!issue68_xrd_recovery/experiments/gpu_20260729/
+issue68_xrd_recovery/experiments/gpu_20260729/**
+!issue68_xrd_recovery/experiments/gpu_20260729/README.md
+!issue68_xrd_recovery/experiments/gpu_20260729/metrics/
+issue68_xrd_recovery/experiments/gpu_20260729/metrics/**
+!issue68_xrd_recovery/experiments/gpu_20260729/metrics/final_metrics.csv

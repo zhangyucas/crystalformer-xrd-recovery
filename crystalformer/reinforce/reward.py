@@ -1,27 +1,36 @@
 import os
-import jax
-import jax.numpy as jnp
 import numpy as np
-import joblib
-from collections import defaultdict
 from pymatgen.core import Structure, Lattice
 
-from crystalformer.reinforce import ehull
-from crystalformer.src.wyckoff import wmax_table, mult_table, symops
-from ase.optimize import FIRE
-from ase.filters import FrechetCellFilter
-from pymatgen.io.ase import AseAtomsAdaptor
-from pymatgen.analysis.structure_matcher import StructureMatcher, ElementComparator
-import pandas as pd
-import torch 
+_symops = None
+_mult_table = None
+_wmax_table = None
 
-from BatchRelaxer import BatchRelaxer
 
-symops = np.array(symops)
-mult_table = np.array(mult_table)
-wmax_table = np.array(wmax_table)
+def _symmetry_tables():
+    """Load Wyckoff tables only when a generated structure is evaluated."""
+
+    global _symops, _mult_table, _wmax_table
+    if _symops is None:
+        from crystalformer.src.wyckoff import mult_table, symops, wmax_table
+
+        _symops = np.asarray(symops)
+        _mult_table = np.asarray(mult_table)
+        _wmax_table = np.asarray(wmax_table)
+    return _symops, _mult_table, _wmax_table
+
+
+def __getattr__(name):
+    """Lazily preserve the legacy symmetry-table module attributes."""
+
+    table_names = {"symops": 0, "mult_table": 1, "wmax_table": 2}
+    if name in table_names:
+        return _symmetry_tables()[table_names[name]]
+    raise AttributeError(name)
 
 def all_nonzero_gpus():
+    import torch
+
     n = torch.cuda.device_count()
     return [f"cuda:{i}" for i in range(1, n)]
 
@@ -36,6 +45,8 @@ def relax_structures(relaxer, atoms_list):
         final_energies: List of final energies
 
     """
+
+    from pymatgen.io.ase import AseAtomsAdaptor
 
     ase_adaptor = AseAtomsAdaptor()
 
@@ -58,6 +69,8 @@ def symmetrize_atoms(g, w, x):
     Returns:
        xs: (m, 3) symmetrize atom positions
     '''
+
+    symops, mult_table, wmax_table = _symmetry_tables()
 
     # (1) apply all space group symmetry op to the x 
     w_max = wmax_table[g-1].item()
@@ -88,10 +101,21 @@ def symmetrize_atoms(g, w, x):
 
 
 def get_atoms_from_GLXYZAW(G, L, XYZ, A, W):
-
-    A = A[np.nonzero(A)]
-    X = XYZ[np.nonzero(A)]
-    W = W[np.nonzero(A)]
+    # Convert once at the boundary and derive every padding mask from the
+    # original atom sequence.  The old implementation filtered ``A`` first
+    # and then reused indices from the shortened array for ``XYZ``/``W``;
+    # that silently selected the wrong sites when padding was interspersed.
+    A = np.asarray(A).reshape(-1)
+    XYZ = np.asarray(XYZ)
+    W = np.asarray(W).reshape(-1)
+    if XYZ.ndim != 2 or XYZ.shape[1] != 3:
+        raise ValueError("XYZ must have shape (n_sites, 3)")
+    if not (A.size == XYZ.shape[0] == W.size):
+        raise ValueError("XYZ, A and W must have the same number of sites")
+    active = A != 0
+    A = A[active]
+    X = XYZ[active]
+    W = W[active]
 
     lattice = Lattice.from_parameters(*L)
     xs_list = [symmetrize_atoms(G, w, x) for w, x in zip(W, X)]
@@ -100,6 +124,19 @@ def get_atoms_from_GLXYZAW(G, L, XYZ, A, W):
     struct = Structure(lattice, A_list, X_list)
     struct = struct.get_primitive_structure().to_ase_atoms()
     return struct
+
+
+def get_structure_from_GLXYZAW(G, L, XYZ, A, W):
+    """Return a pymatgen structure without importing the MLFF stack.
+
+    XRD and other CPU-only rewards should use this helper instead of creating
+    ASE atoms.  The implementation lives in ``reinforce.xrd`` so importing
+    this module does not initialize ORB or BatchRelaxer.
+    """
+
+    from crystalformer.reinforce.xrd import structure_from_GLXYZAW
+
+    return structure_from_GLXYZAW(G, L, XYZ, A, W)
 
 
 def make_ehull_reward_fn(calculator, ref_data, batch=50, n_jobs=-1, relaxation=False, clip_value=10.0):
@@ -112,6 +149,14 @@ def make_ehull_reward_fn(calculator, ref_data, batch=50, n_jobs=-1, relaxation=F
         reward_fn: single reward function
         batch_reward_fn: batch reward function
     """
+
+    from crystalformer.reinforce import ehull
+    import joblib
+    import pandas as pd
+    from ase.filters import FrechetCellFilter
+    from ase.optimize import FIRE
+    from BatchRelaxer import BatchRelaxer
+    from pymatgen.io.ase import AseAtomsAdaptor
 
     ase_adaptor = AseAtomsAdaptor()
 
@@ -161,6 +206,9 @@ def make_ehull_reward_fn(calculator, ref_data, batch=50, n_jobs=-1, relaxation=F
         return output
 
     def batch_reward_fn(x, path=None, epoch=None):
+        import jax
+        import jax.numpy as jnp
+
         x = jax.tree_util.tree_map(lambda _x: jax.device_put(_x, jax.devices('cpu')[0]), x)
         G, L, XYZ, A, W = x
         G, L, XYZ, A, W = np.array(G), np.array(L), np.array(XYZ), np.array(A), np.array(W)
@@ -196,7 +244,7 @@ def make_ehull_reward_fn(calculator, ref_data, batch=50, n_jobs=-1, relaxation=F
         
         output = map_reward_fn(structures, energies)
         output = jnp.array(output)
-        output = jax.device_put(output, jax.devices('gpu')[0]).block_until_ready()
+        output = jax.device_put(output, jax.devices()[0]).block_until_ready()
 
         if path is not None and epoch is not None:
             data = pd.DataFrame()
@@ -213,6 +261,14 @@ def make_ehull_reward_fn(calculator, ref_data, batch=50, n_jobs=-1, relaxation=F
         return output  
 
     return reward_fn, batch_reward_fn
+
+
+def make_xrd_reward_fn(*args, **kwargs):
+    """Lazy public wrapper for the CPU-only XRD reward factory."""
+
+    from crystalformer.reinforce.xrd import make_xrd_reward_fn as _make_xrd_reward_fn
+
+    return _make_xrd_reward_fn(*args, **kwargs)
 
 
 def make_prop_reward_fn(model, target, dummy_value=5, loss_type='mse'):
@@ -247,7 +303,10 @@ def make_prop_reward_fn(model, target, dummy_value=5, loss_type='mse'):
         
         return quantity
 
-    def batch_reward_fn(x):
+    def batch_reward_fn(x, path=None, epoch=None):
+        import jax
+        import jax.numpy as jnp
+
         x = jax.tree_util.tree_map(lambda _x: jax.device_put(_x, jax.devices('cpu')[0]), x)
         G, L, XYZ, A, W = x
         G, L, XYZ, A, W = np.array(G), np.array(L), np.array(XYZ), np.array(A), np.array(W)
@@ -262,7 +321,7 @@ def make_prop_reward_fn(model, target, dummy_value=5, loss_type='mse'):
         else:
             raise ValueError('Invalid loss type')
         
-        output = jax.device_put(output, jax.devices('gpu')[0]).block_until_ready()
+        output = jax.device_put(output, jax.devices()[0]).block_until_ready()
 
         return output
 
@@ -314,14 +373,17 @@ def make_dielectric_reward_fn(models, dummy_value=0):
         return reward
 
 
-    def batch_reward_fn(x):
+    def batch_reward_fn(x, path=None, epoch=None):
+        import jax
+        import jax.numpy as jnp
+
         x = jax.tree_util.tree_map(lambda _x: jax.device_put(_x, jax.devices('cpu')[0]), x)
         G, L, XYZ, A, W = x
         G, L, XYZ, A, W = np.array(G), np.array(L), np.array(XYZ), np.array(A), np.array(W)
         x = (G, L, XYZ, A, W)
         output = map(reward_fn, zip(*x))
         output = np.array(list(output))
-        output = jax.device_put(output, jax.devices('gpu')[0]).block_until_ready()
+        output = jax.device_put(output, jax.devices()[0]).block_until_ready()
 
         return output
 
@@ -350,14 +412,17 @@ def make_density_reward_fn(inverse=False):
 
         return struct.density if not inverse else -struct.density
 
-    def batch_reward_fn(x):
+    def batch_reward_fn(x, path=None, epoch=None):
+        import jax
+        import jax.numpy as jnp
+
         x = jax.tree_util.tree_map(lambda _x: jax.device_put(_x, jax.devices('cpu')[0]), x)
         G, L, XYZ, A, W = x
         G, L, XYZ, A, W = np.array(G), np.array(L), np.array(XYZ), np.array(A), np.array(W)
         x = (G, L, XYZ, A, W)
         output = map(reward_fn, zip(*x))
         output = np.array(list(output))
-        output = jax.device_put(output, jax.devices('gpu')[0]).block_until_ready()
+        output = jax.device_put(output, jax.devices()[0]).block_until_ready()
 
         return output
 

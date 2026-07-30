@@ -313,19 +313,121 @@ where
 - `mlff_model`: the machine learning force field model to predict the total energy. We support [`orb`](https://github.com/orbital-materials/orb-models) model for the $E_{hull}$ reward
 - `mlff_path`: the path to load the checkpoint of the machine learning force field model
 
-Currently, CSP reinforcement fine-tuning only supports the `ehull` reward. For DNG reinforcement fine-tuning, simply omit the `--formula` argument.
+The legacy CSP path supports the `ehull` reward; the Issue #68 path adds the
+CPU-only `xrd` reward. For DNG reinforcement fine-tuning, simply omit the
+`--formula` argument.
+
+### Powder XRD inverse recovery
+
+The Issue #68 XRD path keeps the pretrained CrystalFormer as the prior and
+uses a host-side, non-differentiable pymatgen simulator as the reward.  A
+candidate is expanded from `(G, L, XYZ, A, W)`, simulated with
+`XRDCalculator`, broadened onto a fixed `2theta` grid, and scored by cosine
+similarity.  XRD similarity is a maximize reward; the existing e-hull/property
+rewards keep their original minimize convention.  The simulator never runs
+inside a JAX gradient transformation.
+
+Create a reproducible simulated target from a known CIF:
+
+```bash
+python issue68_xrd_recovery/scripts/xrd_recovery.py target \
+  --cif known.cif \
+  --output experiments/xrd/target.csv \
+  --grid-step 0.05 \
+  --fwhm 0.10 \
+  --noise-std 0.01 \
+  --seed 0
+```
+
+For a constrained CPU/WSL smoke run, keep the candidate batch and sampling
+multiplier small and run one job at a time:
+
+```bash
+JAX_PLATFORMS=cpu JAX_SKIP_CUDA_CONSTRAINTS_CHECK=1 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python -m crystalformer.cli.train_ppo \
+  --reward xrd \
+  --formula Si \
+  --xrd_target experiments/xrd/target.csv \
+  --restore_path BASE_CHECKPOINT \
+  --folder experiments/xrd/ppo/ \
+  --safe_cpu --epochs 1 --ppo_epochs 1 --batchsize 4 \
+  --sample_multiplier 2 --max_sampling_attempts 20 --K 5 \
+  --seed 42 --sg_temperature 0.8 --sg_epsilon 0.05 \
+  --h0_size 64 --transformer_layers 2 --num_heads 4 \
+  --key_size 16 --model_size 64 --embed_size 64
+```
+
+The checkpoint must have the same compact architecture. `--safe_cpu` refuses
+the default 16-layer/256-dimensional configuration and checkpoints larger than
+64 MiB before JAX allocation instead of risking a memory spike; use the full
+pretrained checkpoint on a machine with more RAM.
+
+Score candidate CIFs without loading the Transformer or an MLFF:
+
+```bash
+python issue68_xrd_recovery/scripts/xrd_recovery.py evaluate \
+  --target experiments/xrd/target.csv \
+  --candidates experiments/xrd/candidates/ \
+  --ground-truth known.cif \
+  --output experiments/xrd/results.csv
+```
+
+The evaluation reports XRD similarity and `StructureMatcher` recovery
+separately; a high powder-pattern score alone is not a structure-identity
+claim.
+
+Run the no-prior random-move Monte Carlo reference with a bounded budget:
+
+```bash
+python issue68_xrd_recovery/scripts/xrd_recovery.py random-move \
+  --target experiments/xrd/target.csv \
+  --formula Si \
+  --output-dir experiments/xrd/random_move/ \
+  --ground-truth known.cif \
+  --evaluations 500 --restarts 4 --seed 0
+```
+
+Generate a reproducible tau sweep command file and summarize completed runs:
+
+```bash
+python issue68_xrd_recovery/scripts/xrd_study.py make-commands \
+  --target experiments/xrd/target.csv --formula Si \
+  --restore-path BASE_CHECKPOINT --output-root experiments/xrd/tau_sweep \
+  --seeds 42,43 --ground-truth known.cif
+python issue68_xrd_recovery/scripts/xrd_study.py summarize \
+  --runs experiments/xrd --output experiments/xrd/study
+```
+
+`--tau` is an alias for the existing PPO `--beta` KL/prior coefficient. The
+study tool reports cosine-threshold recovery separately from
+`StructureMatcher`; with `--ground-truth`, each generated serial command also
+evaluates its candidate CIFs and records the matching metadata. It does not
+treat a good spectrum fit as proof of a ground-truth structure. `--seed` makes
+repeated runs reproducible; `--sg_temperature` and `--sg_epsilon` control
+space-group sampling, `--exploration_weight` aliases the entropy weight, and
+`--diversity_weight` enables an optional inverse-frequency bonus for distinct
+discrete structure sequences.
+
+On a small WSL machine, set `JAX_PLATFORMS=cpu`, skip the unavailable CUDA
+probe with `JAX_SKIP_CUDA_CONSTRAINTS_CHECK=1`, disable XLA preallocation, use
+a batch size of at most 8, and run one sweep value at a time. The
+random-move and evaluation commands do not load a checkpoint and are the safe
+way to validate the forward model before attempting PPO.
 
 ### Writing custom reward functions
 
 Custom reward functions are implemented as Python factory functions that return a pair (`reward_fn`, `batch_reward_fn`). Follow the patterns in [crystalformer/reinforce/reward.py](crystalformer/reinforce/reward.py) to implement your own reward functions.
 
 > [!CAUTION]
-> **Reward direction**: The reinforcement fine-tuning uses gradient ascent combined with reward inversion, which effectively **minimizes** the reward. If you want to minimize a property (e.g., energy, formation energy), return the positive value directly. If you want to **maximize** a property, return its **negative** value as the reward. For example, to minimize $E_{hull}$, the reward function simply returns `ehull`.
+> **Reward direction**: Legacy energy/property rewards use the historical
+> minimize convention. The XRD path explicitly sets `reward_direction="maximize"`
+> so a larger cosine similarity is better; do not negate the XRD score.
 
 Guidelines
 
 - Signature: `reward_fn(x)` accepts a single sample tuple `(G, L, XYZ, A, W)` and returns a scalar reward (float or numpy scalar).
-- Batch API: `batch_reward_fn(x)` accepts a batched `x=(G,L,XYZ,A,W)` (JAX arrays). It should convert inputs to CPU numpy arrays, compute per-sample rewards (e.g., by calling reward_fn or a vectorized routine), and return a jax.numpy array placed on the GPU (see examples below for device transfers using jax.device_put).
+- Batch API: `batch_reward_fn(x)` accepts a batched `x=(G,L,XYZ,A,W)` (JAX arrays). It should convert inputs to CPU numpy arrays, compute per-sample rewards (e.g., by calling reward_fn or a vectorized routine), and return a jax.numpy array placed on the GPU (see examples below for device transfers using jax.device_put). The XRD factory is the deliberate host-side exception and returns a NumPy vector so the simulator stays outside JAX transformations.
 - Structure conversion: use `get_atoms_from_GLXYZAW(G, L, XYZ, A, W)` from crystalformer.reinforce.reward to convert the representation to ASE Atoms or a pymatgen Structure before calling property predictors or MLFFs.
 - Robustness: catch exceptions and return a sensible dummy or clipped reward for failed predictions to avoid crashing training.
 - Performance: for heavy operations (relaxations, MLFF evaluations), prefer parallel/batched implementations where possible.

@@ -399,6 +399,8 @@ dependencies = [
     { name = "optax" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pymatgen", version = "2025.10.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pymatgen", version = "2026.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyxtal" },
 ]
 
@@ -417,6 +419,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24" },
     { name = "optax", specifier = "==0.2.6" },
     { name = "pandas", specifier = ">=2.0" },
+    { name = "pymatgen", specifier = ">=2024.10" },
     { name = "pyxtal", specifier = "==1.1.1" },
 ]
 provides-extras = ["cuda12"]
