@@ -61,6 +61,36 @@ def sample_x(key, h_x, Kx, top_p, temperature, batchsize):
     return key, x 
 
 
+def composition_progress_mask(composition, atoms, multiplicities, tolerance=0.0):
+    """Allow target elements whose generated stoichiometric progress is not ahead."""
+    composition = jnp.asarray(composition, dtype=jnp.int32)
+    target_elements = composition > 0
+
+    def gcd_step(i, value):
+        return jnp.gcd(value, composition[i])
+
+    ratio_gcd = jax.lax.fori_loop(0, composition.shape[0], gcd_step, 0)
+    ratio_gcd = jnp.maximum(ratio_gcd, 1)
+    target_ratio = jnp.where(target_elements, composition // ratio_gcd, 1)
+
+    valid_sites = (atoms > 0) & (multiplicities > 0)
+    counts = jnp.sum(
+        jax.nn.one_hot(atoms, composition.shape[0], dtype=jnp.float32)
+        * jnp.where(valid_sites, multiplicities, 0)[..., None],
+        axis=1,
+    )
+    progress = counts / target_ratio[None, :]
+    progress_min = jnp.min(
+        jnp.where(target_elements[None, :], progress, jnp.inf),
+        axis=1,
+        keepdims=True,
+    )
+    allowed = target_elements[None, :] & (
+        progress <= progress_min + tolerance
+    )
+    return allowed.at[:, 0].set(True)
+
+
 def make_sample_crystal(
     transformer,
     n_max,
@@ -77,6 +107,7 @@ def make_sample_crystal(
     spg_mask=None,
     sg_temperature=None,
     sg_epsilon=0.0,
+    composition_progress_tolerance=0.0,
 ):
 
     if temperature <= 0:
@@ -87,6 +118,8 @@ def make_sample_crystal(
         raise ValueError("sg_temperature must be positive")
     if not 0.0 <= sg_epsilon <= 1.0:
         raise ValueError("sg_epsilon must be in [0, 1]")
+    if composition_progress_tolerance < 0:
+        raise ValueError("composition_progress_tolerance must be non-negative")
 
     if atom_mask is None:
         user_atom_mask = jnp.ones((atom_types,), dtype=bool)
@@ -97,12 +130,12 @@ def make_sample_crystal(
     def sample_crystal(key, params, batchsize, composition):
 
         is_comp_provided = jnp.sum(composition) > 0
-        atom_mask = jnp.where(
+        base_atom_mask = jnp.where(
             is_comp_provided,
             composition > 0,     # conditional
             user_atom_mask       # unconditional
         )
-        atom_mask = atom_mask.at[0].set(True) # padding atom always allowed
+        base_atom_mask = base_atom_mask.at[0].set(True) # padding atom always allowed
            
         def body_fn(i, state):
             key, W, A, X, Y, Z, L = state 
@@ -123,7 +156,22 @@ def make_sample_crystal(
             a_logit = h_al[:, :atom_types]
         
             key, subkey = jax.random.split(key)
-            a_logit = a_logit + jnp.where(atom_mask, 0.0, -1e10) # enhance the probability of masked atoms (do not need to normalize since we only use it for sampling, not computing logp)
+            multiplicities = jax.vmap(
+                lambda g_i, w_i: mult_table[g_i - 1, w_i],
+                in_axes=(0, 0),
+            )(G, W)
+            progress_mask = composition_progress_mask(
+                composition,
+                A,
+                multiplicities,
+                composition_progress_tolerance,
+            )
+            atom_mask = jnp.where(
+                is_comp_provided,
+                progress_mask,
+                base_atom_mask[None, :],
+            )
+            a_logit = a_logit + jnp.where(atom_mask, 0.0, -1e10)
             a = sample_top_p(subkey, a_logit, top_p, temperature)
             A = A.at[:, i].set(a)
         
