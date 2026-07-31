@@ -12,6 +12,12 @@ build/
 
 # Issue #68 generated artifacts: checkpoints, JAX caches, raw samples, and runs.
 issue68_xrd_recovery/experiments/**
+!issue68_xrd_recovery/experiments/benchmark_20260731/
+issue68_xrd_recovery/experiments/benchmark_20260731/**
+!issue68_xrd_recovery/experiments/benchmark_20260731/REPORT_ZH.md
+!issue68_xrd_recovery/experiments/benchmark_20260731/metrics/
+issue68_xrd_recovery/experiments/benchmark_20260731/metrics/**
+!issue68_xrd_recovery/experiments/benchmark_20260731/metrics/results_summary.csv
 !issue68_xrd_recovery/experiments/gpu_20260729/
 issue68_xrd_recovery/experiments/gpu_20260729/**
 !issue68_xrd_recovery/experiments/gpu_20260729/README.md

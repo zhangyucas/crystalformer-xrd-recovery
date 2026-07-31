@@ -114,6 +114,36 @@ def _can_finish(spacegroup, ratio, previous_w, counts, remaining_sites, max_atom
     return False
 
 
+@lru_cache(maxsize=500_000)
+def _minimum_final_atoms(
+    spacegroup, ratio, previous_w, counts, remaining_sites, max_atoms
+):
+    """Return the smallest reachable ``k * ratio`` atom count."""
+    if _is_complete(counts, ratio):
+        return sum(counts)
+    if remaining_sites <= 0 or sum(counts) >= max_atoms:
+        return None
+
+    minimum_multiplier = max(
+        1, max(ceil(count / part) for count, part in zip(counts, ratio))
+    )
+    maximum_multiplier = max_atoms // sum(ratio)
+    for multiplier in range(minimum_multiplier, maximum_multiplier + 1):
+        target = tuple(multiplier * part for part in ratio)
+        if any(count > goal for count, goal in zip(counts, target)):
+            continue
+        deficits = tuple(goal - count for count, goal in zip(counts, target))
+        if _can_fill(spacegroup, previous_w, deficits, remaining_sites):
+            return multiplier * sum(ratio)
+    return None
+
+
+def _cost_value(final_atoms, ratio, max_atoms):
+    if final_atoms is None:
+        return np.float32(np.inf)
+    return np.float32(final_atoms / max(sum(ratio), 1))
+
+
 def can_finish_composition(
     spacegroup,
     ratio,
@@ -222,6 +252,50 @@ def wyckoff_reachability_mask(
     return allowed
 
 
+def wyckoff_reachability_costs(
+    composition,
+    atoms,
+    wyckoff,
+    spacegroup,
+    remaining_after_current,
+    wyck_types=28,
+    max_atoms=512,
+):
+    """Minimum final formula multiplier for every reachable Wyckoff action."""
+    elements, ratio, counts, previous_w = _sample_state(
+        composition, atoms, wyckoff, int(spacegroup)
+    )
+    costs = np.full(int(wyck_types), np.inf, dtype=np.float32)
+    if not ratio:
+        costs[:] = 0.0
+        return costs
+
+    if _is_complete(counts, ratio):
+        costs[0] = _cost_value(sum(counts), ratio, max_atoms)
+    for w in _next_wyckoff_indices(int(spacegroup), previous_w):
+        if w >= wyck_types:
+            continue
+        multiplicity = int(_MULTIPLICITIES[int(spacegroup) - 1, w])
+        minimum = None
+        for element_index in range(len(elements)):
+            updated = list(counts)
+            updated[element_index] += multiplicity
+            if sum(updated) > max_atoms:
+                continue
+            final_atoms = _minimum_final_atoms(
+                int(spacegroup),
+                ratio,
+                w,
+                tuple(updated),
+                int(remaining_after_current),
+                int(max_atoms),
+            )
+            if final_atoms is not None and (minimum is None or final_atoms < minimum):
+                minimum = final_atoms
+        costs[w] = _cost_value(minimum, ratio, max_atoms)
+    return costs
+
+
 def atom_reachability_mask(
     composition,
     atoms,
@@ -262,6 +336,48 @@ def atom_reachability_mask(
     return allowed
 
 
+def atom_reachability_costs(
+    composition,
+    atoms,
+    wyckoff,
+    spacegroup,
+    current_w,
+    remaining_after_current,
+    atom_types=119,
+    max_atoms=512,
+):
+    """Minimum final formula multiplier for every reachable element action."""
+    elements, ratio, counts, _ = _sample_state(
+        composition, atoms, wyckoff, int(spacegroup)
+    )
+    costs = np.full(int(atom_types), np.inf, dtype=np.float32)
+    current_w = int(current_w)
+    if not ratio:
+        costs[:] = 0.0
+        return costs
+    if current_w == 0:
+        if _is_complete(counts, ratio):
+            costs[0] = _cost_value(sum(counts), ratio, max_atoms)
+        return costs
+
+    multiplicity = int(_MULTIPLICITIES[int(spacegroup) - 1, current_w])
+    for element_index, element in enumerate(elements):
+        updated = list(counts)
+        updated[element_index] += multiplicity
+        if sum(updated) > max_atoms:
+            continue
+        final_atoms = _minimum_final_atoms(
+            int(spacegroup),
+            ratio,
+            current_w,
+            tuple(updated),
+            int(remaining_after_current),
+            int(max_atoms),
+        )
+        costs[element] = _cost_value(final_atoms, ratio, max_atoms)
+    return costs
+
+
 def batched_wyckoff_reachability_mask(
     composition,
     atoms,
@@ -274,6 +390,31 @@ def batched_wyckoff_reachability_mask(
     return np.stack(
         [
             wyckoff_reachability_mask(
+                composition,
+                atom_row,
+                wyckoff_row,
+                group,
+                remaining_after_current,
+                wyck_types,
+                max_atoms,
+            )
+            for atom_row, wyckoff_row, group in zip(atoms, wyckoff, spacegroups)
+        ]
+    )
+
+
+def batched_wyckoff_reachability_costs(
+    composition,
+    atoms,
+    wyckoff,
+    spacegroups,
+    remaining_after_current,
+    wyck_types,
+    max_atoms,
+):
+    return np.stack(
+        [
+            wyckoff_reachability_costs(
                 composition,
                 atom_row,
                 wyckoff_row,
@@ -344,6 +485,54 @@ def trajectory_reachability_masks(
     )
 
 
+def trajectory_reachability_costs(
+    composition,
+    atoms,
+    wyckoff,
+    spacegroup,
+    wyck_types=28,
+    atom_types=119,
+    max_atoms=512,
+):
+    """Rebuild the per-step size costs used to sample one trajectory."""
+    atoms = np.asarray(atoms, dtype=np.int32)
+    wyckoff = np.asarray(wyckoff, dtype=np.int32)
+    n_max = len(atoms)
+    wyckoff_costs = []
+    atom_costs = []
+    for i in range(n_max):
+        prefix_atoms = atoms.copy()
+        prefix_wyckoff = wyckoff.copy()
+        prefix_atoms[i:] = 0
+        prefix_wyckoff[i:] = 0
+        remaining_real_sites = max(n_max - i - 2, 0)
+        wyckoff_cost = wyckoff_reachability_costs(
+            composition,
+            prefix_atoms,
+            prefix_wyckoff,
+            spacegroup,
+            remaining_real_sites,
+            wyck_types,
+            max_atoms,
+        )
+        if np.any(np.asarray(composition) > 0) and i == n_max - 1:
+            wyckoff_cost[1:] = np.inf
+        wyckoff_costs.append(wyckoff_cost)
+        atom_costs.append(
+            atom_reachability_costs(
+                composition,
+                prefix_atoms,
+                prefix_wyckoff,
+                spacegroup,
+                wyckoff[i],
+                remaining_real_sites,
+                atom_types,
+                max_atoms,
+            )
+        )
+    return np.stack(wyckoff_costs), np.stack(atom_costs)
+
+
 def batched_atom_reachability_mask(
     composition,
     atoms,
@@ -356,6 +545,33 @@ def batched_atom_reachability_mask(
 ):
     return np.stack([
         atom_reachability_mask(
+            composition,
+            atom_row,
+            wyckoff_row,
+            group,
+            w,
+            remaining_after_current,
+            atom_types,
+            max_atoms,
+        )
+        for atom_row, wyckoff_row, group, w in zip(
+            atoms, wyckoff, spacegroups, current_w
+        )
+    ])
+
+
+def batched_atom_reachability_costs(
+    composition,
+    atoms,
+    wyckoff,
+    spacegroups,
+    current_w,
+    remaining_after_current,
+    atom_types,
+    max_atoms,
+):
+    return np.stack([
+        atom_reachability_costs(
             composition,
             atom_row,
             wyckoff_row,

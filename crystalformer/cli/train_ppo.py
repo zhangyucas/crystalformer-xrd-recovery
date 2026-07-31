@@ -118,6 +118,8 @@ def main():
                        help='maximum conditional sampling attempts per epoch')
     group.add_argument('--composition_max_atoms', '--composition-max-atoms', type=int, default=512,
                        help='maximum unit-cell atoms considered by composition reachability')
+    group.add_argument('--composition_size_bias', '--composition-size-bias', type=float, default=0.0,
+                       help='soft preference for smaller reachable unit cells; 0 disables it')
     group.add_argument('--seed', type=int, default=42,
                        help='random seed for model initialization and PPO sampling')
     group.add_argument('--safe_cpu', action='store_true',
@@ -212,6 +214,8 @@ def main():
         parser.error('--sample_multiplier and --max_sampling_attempts must be positive')
     if args.composition_max_atoms <= 0:
         parser.error('--composition-max-atoms must be positive')
+    if args.composition_size_bias < 0:
+        parser.error('--composition-size-bias cannot be negative')
     if args.sampling_batchsize is not None and args.sampling_batchsize <= 0:
         parser.error('--sampling_batchsize must be positive')
     if args.ppo_microbatch_size is not None and args.ppo_microbatch_size <= 0:
@@ -366,6 +370,7 @@ def main():
         transformer,
         composition_reachability=args.formula is not None,
         composition_max_atoms=args.composition_max_atoms,
+        composition_size_bias=args.composition_size_bias,
     )
 
     print("\n========== Prepare logs ==========")
@@ -380,6 +385,7 @@ def main():
                     + ('g_%g_w_%g_a_%g_xyz_%g_l_%g_'%(args.lamb_g, args.lamb_w, args.lamb_a, args.lamb_xyz, args.lamb_l)) \
                     + args.optimizer+"_bs_%d_lr_%g" % (args.batchsize, args.lr) \
                     + ("_wd_%g"%(args.weight_decay) if args.optimizer == "adamw" else "") \
+                    + ("_sizebias_%g" % args.composition_size_bias if args.composition_size_bias else "") \
                     +  "_sgT_%g_sgE_%g_div_%g_seed_%d_" % (
                         effective_sg_temperature,
                         args.sg_epsilon,
@@ -539,6 +545,7 @@ def main():
         sg_epsilon=args.sg_epsilon,
         composition_reachability=args.formula is not None,
         composition_max_atoms=args.composition_max_atoms,
+        composition_size_bias=args.composition_size_bias,
     )
 
     print("\n========== Start RL training ==========")

@@ -1,0 +1,12 @@
+benchmark,case,candidates,evaluated,best_xrd_similarity,structure_matches,structure_match_rate,first_match_rank,target_recovered
+self_supervised,NaCl,100,100,0.7615167332,100,1.000000,1,true
+self_supervised,MgO,100,100,0.3437767724,27,0.270000,1,true
+self_supervised,KCl,100,100,0.2386766083,65,0.650000,14,true
+self_supervised,Si,100,100,0.5388333060,0,0.000000,,false
+opXRD,Ti,50,50,0.8467615809,7,0.140000,29,true
+opXRD,Zr,50,49,0.4432430467,1,0.020408,49,true
+opXRD,NbS2,50,49,0.7436400378,0,0.000000,,false
+opXRD,CdS,50,49,0.3274173722,0,0.000000,,false
+opXRD,FeSe,50,50,0.7062093411,0,0.000000,,false
+opXRD,Sn,50,50,0.3706332842,0,0.000000,,false
+SimXRD-4M,official_code_test,9,0,,0,,,blocked_missing_ground_truth

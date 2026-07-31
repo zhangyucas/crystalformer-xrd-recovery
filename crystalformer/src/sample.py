@@ -7,7 +7,9 @@ from crystalformer.src.von_mises import sample_von_mises
 from crystalformer.src.lattice import symmetrize_lattice
 from crystalformer.src.wyckoff import mult_table, symops
 from crystalformer.src.composition_reachability import (
+    batched_atom_reachability_costs,
     batched_atom_reachability_mask,
+    batched_wyckoff_reachability_costs,
     batched_wyckoff_reachability_mask,
     spacegroup_reachability_mask,
 )
@@ -116,6 +118,7 @@ def make_sample_crystal(
     composition_progress_tolerance=0.0,
     composition_reachability=True,
     composition_max_atoms=512,
+    composition_size_bias=0.0,
 ):
 
     if temperature <= 0:
@@ -130,6 +133,8 @@ def make_sample_crystal(
         raise ValueError("composition_progress_tolerance must be non-negative")
     if composition_max_atoms <= 0:
         raise ValueError("composition_max_atoms must be positive")
+    if composition_size_bias < 0:
+        raise ValueError("composition_size_bias must be non-negative")
 
     if atom_mask is None:
         user_atom_mask = jnp.ones((atom_types,), dtype=bool)
@@ -178,6 +183,36 @@ def make_sample_crystal(
                     G,
                     jnp.maximum(n_max - i - 2, 0),
                 )
+                if composition_size_bias > 0:
+                    def wyckoff_cost_callback(
+                        composition_, atoms_, wyckoff_, groups_, remaining_
+                    ):
+                        return batched_wyckoff_reachability_costs(
+                            composition_, atoms_, wyckoff_, groups_,
+                            int(remaining_), wyck_types, composition_max_atoms,
+                        )
+
+                    wyckoff_cost = jax.pure_callback(
+                        wyckoff_cost_callback,
+                        jax.ShapeDtypeStruct(
+                            (batchsize, wyck_types), jnp.float32
+                        ),
+                        composition,
+                        A,
+                        W,
+                        G,
+                        jnp.maximum(n_max - i - 2, 0),
+                    )
+                    finite_cost = jnp.where(
+                        jnp.isfinite(wyckoff_cost), wyckoff_cost, jnp.inf
+                    )
+                    minimum_cost = jnp.min(finite_cost, axis=1, keepdims=True)
+                    relative_cost = jnp.where(
+                        jnp.isfinite(wyckoff_cost),
+                        wyckoff_cost - minimum_cost,
+                        0.0,
+                    )
+                    w_logit = w_logit - composition_size_bias * relative_cost
                 # Keep the final slot for PAD; lattice parameters are read there.
                 wyckoff_mask = jnp.where(
                     is_comp_provided & (i == n_max - 1),
@@ -228,6 +263,38 @@ def make_sample_crystal(
                     w,
                     jnp.maximum(n_max - i - 2, 0),
                 )
+                if composition_size_bias > 0:
+                    def atom_cost_callback(
+                        composition_, atoms_, wyckoff_, groups_, current_w_,
+                        remaining_,
+                    ):
+                        return batched_atom_reachability_costs(
+                            composition_, atoms_, wyckoff_, groups_, current_w_,
+                            int(remaining_), atom_types, composition_max_atoms,
+                        )
+
+                    atom_cost = jax.pure_callback(
+                        atom_cost_callback,
+                        jax.ShapeDtypeStruct(
+                            (batchsize, atom_types), jnp.float32
+                        ),
+                        composition,
+                        A,
+                        W,
+                        G,
+                        w,
+                        jnp.maximum(n_max - i - 2, 0),
+                    )
+                    finite_cost = jnp.where(
+                        jnp.isfinite(atom_cost), atom_cost, jnp.inf
+                    )
+                    minimum_cost = jnp.min(finite_cost, axis=1, keepdims=True)
+                    relative_cost = jnp.where(
+                        jnp.isfinite(atom_cost),
+                        atom_cost - minimum_cost,
+                        0.0,
+                    )
+                    a_logit = a_logit - composition_size_bias * relative_cost
             else:
                 progress_mask = composition_progress_mask(
                     composition,

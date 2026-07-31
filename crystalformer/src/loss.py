@@ -7,6 +7,7 @@ from crystalformer.src.von_mises import von_mises_logpdf
 from crystalformer.src.lattice import make_lattice_mask
 from crystalformer.src.wyckoff import mult_table, fc_mask_table
 from crystalformer.src.composition_reachability import (
+    trajectory_reachability_costs,
     trajectory_reachability_masks,
 )
 
@@ -23,6 +24,7 @@ def make_loss_fn(
     lamb_l=1.0,
     composition_reachability=False,
     composition_max_atoms=512,
+    composition_size_bias=0.0,
 ):
     """
     Args:
@@ -37,12 +39,16 @@ def make_loss_fn(
       lamb_l: weight for lattice parameter loss
       composition_reachability: replay the exact composition masks in log-probs
       composition_max_atoms: maximum atom count considered by reachability DP
+      composition_size_bias: soft penalty for larger reachable final cells
 
     Returns:
       loss_fn: loss function
       logp_fn: log probability function
     """
     
+    if composition_size_bias < 0:
+        raise ValueError("composition_size_bias must be non-negative")
+
     coord_types = 3*Kx
     lattice_mask = make_lattice_mask()
 
@@ -105,6 +111,46 @@ def make_loss_fn(
             g_logit = g_logit + jnp.where(group_mask, 0.0, -1e10)
             w_logit = w_logit + jnp.where(wyckoff_mask, 0.0, -1e10)
             a_logit = a_logit + jnp.where(atom_mask, 0.0, -1e10)
+            if composition_size_bias > 0:
+                def reachability_cost_callback(
+                    composition_, atoms_, wyckoff_, group_
+                ):
+                    return trajectory_reachability_costs(
+                        composition_,
+                        atoms_,
+                        wyckoff_,
+                        int(group_),
+                        wyck_types,
+                        atom_types,
+                        composition_max_atoms,
+                    )
+
+                wyckoff_cost, atom_cost = jax.pure_callback(
+                    reachability_cost_callback,
+                    (
+                        jax.ShapeDtypeStruct(
+                            (n_max, wyck_types), jnp.float32
+                        ),
+                        jax.ShapeDtypeStruct(
+                            (n_max, atom_types), jnp.float32
+                        ),
+                    ),
+                    composition,
+                    A,
+                    W,
+                    G,
+                    vmap_method="sequential",
+                )
+
+                def relative_cost(cost):
+                    finite = jnp.where(jnp.isfinite(cost), cost, jnp.inf)
+                    minimum = jnp.min(finite, axis=1, keepdims=True)
+                    return jnp.where(
+                        jnp.isfinite(cost), cost - minimum, 0.0
+                    )
+
+                w_logit -= composition_size_bias * relative_cost(wyckoff_cost)
+                a_logit -= composition_size_bias * relative_cost(atom_cost)
             g_logit -= jax.scipy.special.logsumexp(g_logit)
             w_logit -= jax.scipy.special.logsumexp(
                 w_logit, axis=1, keepdims=True

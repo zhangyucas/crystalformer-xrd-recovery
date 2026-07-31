@@ -255,6 +255,8 @@ def sample_prior(args: argparse.Namespace) -> None:
         raise ValueError("--sg-epsilon must be in [0, 1]")
     if args.K < 0 or args.K > 230:
         raise ValueError("--K must be in [0, 230]")
+    if args.composition_size_bias < 0:
+        raise ValueError("--composition-size-bias must be non-negative")
     if args.spacegroup is not None and not 1 <= args.spacegroup <= 230:
         raise ValueError("--spacegroup must be in [1, 230]")
 
@@ -355,6 +357,7 @@ def sample_prior(args: argparse.Namespace) -> None:
             sg_temperature=args.sg_temperature,
             sg_epsilon=args.sg_epsilon,
             composition_max_atoms=args.composition_max_atoms,
+            composition_size_bias=args.composition_size_bias,
         )
 
         fieldnames = [
@@ -476,6 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--K", type=int, default=0)
     sample.add_argument("--spacegroup", type=int, default=None)
     sample.add_argument("--composition-max-atoms", type=int, default=512)
+    sample.add_argument("--composition-size-bias", type=float, default=0.0)
     sample.add_argument("--compilation-cache", default=None)
     sample.add_argument("--min-available-gib", type=float, default=1.5)
     sample.add_argument("--min-swap-free-gib", type=float, default=0.5)

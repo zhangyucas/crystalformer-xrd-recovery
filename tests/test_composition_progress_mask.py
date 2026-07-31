@@ -6,10 +6,12 @@ import pytest
 from crystalformer.src.loss import make_loss_fn
 from crystalformer.src.sample import composition_progress_mask
 from crystalformer.src.composition_reachability import (
+    atom_reachability_costs,
     atom_reachability_mask,
     fixed_multiplicity_assignment_reachable,
     spacegroup_reachability_mask,
     trajectory_reachability_masks,
+    wyckoff_reachability_costs,
     wyckoff_reachability_mask,
 )
 
@@ -84,6 +86,44 @@ def test_reachability_keeps_both_kcl_choices_after_first_fourfold_site():
     assert bool(mask[19])
     assert not bool(mask[8])
     assert not bool(mask[0])
+
+
+def test_size_cost_prefers_smaller_reachable_wyckoff_path():
+    composition = _composition(Mg=1, O=1)
+    atoms = jnp.zeros(21, dtype=jnp.int32)
+    wyckoff = jnp.zeros(21, dtype=jnp.int32)
+
+    costs = wyckoff_reachability_costs(
+        composition, atoms, wyckoff, spacegroup=225,
+        remaining_after_current=19, max_atoms=128,
+    )
+
+    finite = costs[np.isfinite(costs)]
+    assert finite.size > 1
+    assert np.min(finite) < np.max(finite)
+
+
+def test_size_cost_keeps_larger_atom_actions_reachable():
+    composition = _composition(Mg=1, O=1)
+    atoms = jnp.asarray([12] + [0] * 20)
+    wyckoff = jnp.asarray([1] + [0] * 20)
+
+    mask = atom_reachability_mask(
+        composition, atoms, wyckoff, 225, current_w=2,
+        remaining_after_current=19, max_atoms=128,
+    )
+    costs = atom_reachability_costs(
+        composition, atoms, wyckoff, 225, current_w=2,
+        remaining_after_current=19, max_atoms=128,
+    )
+
+    assert bool(mask[8]) and bool(mask[12])
+    assert np.isfinite(costs[8]) and np.isfinite(costs[12])
+
+
+def test_negative_size_bias_is_rejected():
+    with pytest.raises(ValueError, match="composition_size_bias"):
+        make_loss_fn(4, 119, 28, 2, 1, None, composition_size_bias=-0.1)
 
 
 def test_reachability_only_allows_pad_after_ratio_is_complete():
@@ -248,6 +288,7 @@ def test_reachability_logp_support_is_jittable_and_differentiable():
         Kl,
         transformer,
         composition_reachability=True,
+        composition_size_bias=0.5,
     )
     composition = _composition(K=1, Cl=1)[None, :]
     groups = jnp.asarray([225])
