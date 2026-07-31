@@ -6,9 +6,24 @@ from functools import partial
 from crystalformer.src.von_mises import von_mises_logpdf
 from crystalformer.src.lattice import make_lattice_mask
 from crystalformer.src.wyckoff import mult_table, fc_mask_table
+from crystalformer.src.composition_reachability import (
+    trajectory_reachability_masks,
+)
 
 
-def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0, lamb_w=1.0, lamb_l=1.0):
+def make_loss_fn(
+    n_max,
+    atom_types,
+    wyck_types,
+    Kx,
+    Kl,
+    transformer,
+    lamb_a=1.0,
+    lamb_w=1.0,
+    lamb_l=1.0,
+    composition_reachability=False,
+    composition_max_atoms=512,
+):
     """
     Args:
       n_max: maximum number of atoms in the unit cell
@@ -20,6 +35,8 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
       lamb_a: weight for atom type loss
       lamb_w: weight for wyckoff position loss
       lamb_l: weight for lattice parameter loss
+      composition_reachability: replay the exact composition masks in log-probs
+      composition_max_atoms: maximum atom count considered by reachability DP
 
     Returns:
       loss_fn: loss function
@@ -59,6 +76,42 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
         h_x = h[2::5, :coord_types]
         h_y = h[3::5, :coord_types]
         h_z = h[4::5, :coord_types]
+
+        if composition_reachability:
+            def reachability_callback(composition_, atoms_, wyckoff_, group_):
+                return trajectory_reachability_masks(
+                    composition_,
+                    atoms_,
+                    wyckoff_,
+                    int(group_),
+                    wyck_types,
+                    atom_types,
+                    composition_max_atoms,
+                )
+
+            group_mask, wyckoff_mask, atom_mask = jax.pure_callback(
+                reachability_callback,
+                (
+                    jax.ShapeDtypeStruct((230,), jnp.bool_),
+                    jax.ShapeDtypeStruct((n_max, wyck_types), jnp.bool_),
+                    jax.ShapeDtypeStruct((n_max, atom_types), jnp.bool_),
+                ),
+                composition,
+                A,
+                W,
+                G,
+                vmap_method="sequential",
+            )
+            g_logit = g_logit + jnp.where(group_mask, 0.0, -1e10)
+            w_logit = w_logit + jnp.where(wyckoff_mask, 0.0, -1e10)
+            a_logit = a_logit + jnp.where(atom_mask, 0.0, -1e10)
+            g_logit -= jax.scipy.special.logsumexp(g_logit)
+            w_logit -= jax.scipy.special.logsumexp(
+                w_logit, axis=1, keepdims=True
+            )
+            a_logit -= jax.scipy.special.logsumexp(
+                a_logit, axis=1, keepdims=True
+            )
 
         logp_g = g_logit[G-1]
 

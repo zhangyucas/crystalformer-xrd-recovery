@@ -1,10 +1,16 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 from functools import partial
 
 from crystalformer.src.von_mises import sample_von_mises
 from crystalformer.src.lattice import symmetrize_lattice
 from crystalformer.src.wyckoff import mult_table, symops
+from crystalformer.src.composition_reachability import (
+    batched_atom_reachability_mask,
+    batched_wyckoff_reachability_mask,
+    spacegroup_reachability_mask,
+)
 
 def project_xyz(g, w, x, idx):
     '''
@@ -108,6 +114,8 @@ def make_sample_crystal(
     sg_temperature=None,
     sg_epsilon=0.0,
     composition_progress_tolerance=0.0,
+    composition_reachability=True,
+    composition_max_atoms=512,
 ):
 
     if temperature <= 0:
@@ -120,6 +128,8 @@ def make_sample_crystal(
         raise ValueError("sg_epsilon must be in [0, 1]")
     if composition_progress_tolerance < 0:
         raise ValueError("composition_progress_tolerance must be non-negative")
+    if composition_max_atoms <= 0:
+        raise ValueError("composition_max_atoms must be positive")
 
     if atom_mask is None:
         user_atom_mask = jnp.ones((atom_types,), dtype=bool)
@@ -143,6 +153,38 @@ def make_sample_crystal(
             # (1) W 
             w_logit = inference(transformer, params, composition, G, W, A, X, Y, Z)[1][:, 5*i] # (batchsize, output_size)
             w_logit = w_logit[:, :wyck_types]
+            if composition_reachability:
+                def wyckoff_callback(
+                    composition_, atoms_, wyckoff_, groups_, remaining_
+                ):
+                    mask = batched_wyckoff_reachability_mask(
+                        composition_, atoms_, wyckoff_, groups_, int(remaining_),
+                        wyck_types, composition_max_atoms,
+                    )
+                    if np.any(np.asarray(composition_) > 0) and not np.all(
+                        np.any(mask, axis=1)
+                    ):
+                        raise ValueError(
+                            "no reachable Wyckoff action for the current composition"
+                        )
+                    return mask
+
+                wyckoff_mask = jax.pure_callback(
+                    wyckoff_callback,
+                    jax.ShapeDtypeStruct((batchsize, wyck_types), jnp.bool_),
+                    composition,
+                    A,
+                    W,
+                    G,
+                    jnp.maximum(n_max - i - 2, 0),
+                )
+                # Keep the final slot for PAD; lattice parameters are read there.
+                wyckoff_mask = jnp.where(
+                    is_comp_provided & (i == n_max - 1),
+                    wyckoff_mask & (jnp.arange(wyck_types) == 0)[None, :],
+                    wyckoff_mask,
+                )
+                w_logit = w_logit + jnp.where(wyckoff_mask, 0.0, -1e10)
         
             key, subkey = jax.random.split(key)
             w = sample_top_p(subkey, w_logit, top_p, temperature)
@@ -160,12 +202,39 @@ def make_sample_crystal(
                 lambda g_i, w_i: mult_table[g_i - 1, w_i],
                 in_axes=(0, 0),
             )(G, W)
-            progress_mask = composition_progress_mask(
-                composition,
-                A,
-                multiplicities,
-                composition_progress_tolerance,
-            )
+            if composition_reachability:
+                def atom_callback(
+                    composition_, atoms_, wyckoff_, groups_, current_w_, remaining_
+                ):
+                    mask = batched_atom_reachability_mask(
+                        composition_, atoms_, wyckoff_, groups_, current_w_,
+                        int(remaining_), atom_types, composition_max_atoms,
+                    )
+                    if np.any(np.asarray(composition_) > 0) and not np.all(
+                        np.any(mask, axis=1)
+                    ):
+                        raise ValueError(
+                            "no reachable element action for the current composition"
+                        )
+                    return mask
+
+                progress_mask = jax.pure_callback(
+                    atom_callback,
+                    jax.ShapeDtypeStruct((batchsize, atom_types), jnp.bool_),
+                    composition,
+                    A,
+                    W,
+                    G,
+                    w,
+                    jnp.maximum(n_max - i - 2, 0),
+                )
+            else:
+                progress_mask = composition_progress_mask(
+                    composition,
+                    A,
+                    multiplicities,
+                    composition_progress_tolerance,
+                )
             atom_mask = jnp.where(
                 is_comp_provided,
                 progress_mask,
@@ -230,6 +299,24 @@ def make_sample_crystal(
         
         #start from sampling the space group
         g_logit = inference(transformer, params, composition, G, W, A, X, Y, Z)[0] # (batchsize, 230) actually should be same along batchsize axis 
+
+        if composition_reachability:
+            def spacegroup_callback(composition_):
+                mask = spacegroup_reachability_mask(
+                    composition_, n_max - 1, composition_max_atoms
+                )
+                if np.any(np.asarray(composition_) > 0) and not np.any(mask):
+                    raise ValueError(
+                        "composition is unreachable within the site and atom limits"
+                    )
+                return mask
+
+            reachable_groups = jax.pure_callback(
+                spacegroup_callback,
+                jax.ShapeDtypeStruct((230,), jnp.bool_),
+                composition,
+            )
+            g_logit = g_logit + jnp.where(reachable_groups, 0.0, -1e10)
 
         if spg_mask is not None:
             # enhance the probability of masked space groups 1 for allow, 0 for not allow

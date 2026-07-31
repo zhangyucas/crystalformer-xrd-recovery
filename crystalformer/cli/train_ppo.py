@@ -116,6 +116,8 @@ def main():
                        help='accumulate PPO gradients in fixed-size microbatches')
     group.add_argument('--max_sampling_attempts', type=int, default=1000,
                        help='maximum conditional sampling attempts per epoch')
+    group.add_argument('--composition_max_atoms', '--composition-max-atoms', type=int, default=512,
+                       help='maximum unit-cell atoms considered by composition reachability')
     group.add_argument('--seed', type=int, default=42,
                        help='random seed for model initialization and PPO sampling')
     group.add_argument('--safe_cpu', action='store_true',
@@ -208,6 +210,8 @@ def main():
         parser.error('--epochs, --ppo_epochs and --batchsize must be positive')
     if args.sample_multiplier <= 0 or args.max_sampling_attempts <= 0:
         parser.error('--sample_multiplier and --max_sampling_attempts must be positive')
+    if args.composition_max_atoms <= 0:
+        parser.error('--composition-max-atoms must be positive')
     if args.sampling_batchsize is not None and args.sampling_batchsize <= 0:
         parser.error('--sampling_batchsize must be positive')
     if args.ppo_microbatch_size is not None and args.ppo_microbatch_size <= 0:
@@ -353,7 +357,16 @@ def main():
 
     ################### Train #############################
 
-    loss_fn, logp_fn = make_loss_fn(args.n_max, args.atom_types, args.wyck_types, args.Kx, args.Kl, transformer)
+    loss_fn, logp_fn = make_loss_fn(
+        args.n_max,
+        args.atom_types,
+        args.wyck_types,
+        args.Kx,
+        args.Kl,
+        transformer,
+        composition_reachability=args.formula is not None,
+        composition_max_atoms=args.composition_max_atoms,
+    )
 
     print("\n========== Prepare logs ==========")
 
@@ -524,6 +537,8 @@ def main():
         g=args.spacegroup,
         sg_temperature=args.sg_temperature,
         sg_epsilon=args.sg_epsilon,
+        composition_reachability=args.formula is not None,
+        composition_max_atoms=args.composition_max_atoms,
     )
 
     print("\n========== Start RL training ==========")

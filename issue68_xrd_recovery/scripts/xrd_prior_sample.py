@@ -354,6 +354,7 @@ def sample_prior(args: argparse.Namespace) -> None:
             g=args.spacegroup,
             sg_temperature=args.sg_temperature,
             sg_epsilon=args.sg_epsilon,
+            composition_max_atoms=args.composition_max_atoms,
         )
 
         fieldnames = [
@@ -474,6 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--sg-epsilon", type=float, default=0.0)
     sample.add_argument("--K", type=int, default=0)
     sample.add_argument("--spacegroup", type=int, default=None)
+    sample.add_argument("--composition-max-atoms", type=int, default=512)
     sample.add_argument("--compilation-cache", default=None)
     sample.add_argument("--min-available-gib", type=float, default=1.5)
     sample.add_argument("--min-swap-free-gib", type=float, default=0.5)
