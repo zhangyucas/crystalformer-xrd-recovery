@@ -188,7 +188,7 @@ def summarize(args: argparse.Namespace) -> None:
         f"Similarity recovery threshold: `{args.threshold:g}`.",
         "StructureMatcher recovery is reported separately and is only computed when a ground truth was supplied.",
         "",
-        "| method | tau | runs | mean cosine | std cosine | StructureMatcher rate | similarity rate |",
+        "| method | tau | runs | mean similarity | std similarity | StructureMatcher rate | similarity rate |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in grouped:
@@ -198,7 +198,7 @@ def summarize(args: argparse.Namespace) -> None:
     lines.extend([
         "",
         "The random-move baseline has no CrystalFormer prior. A tau sweep changes the PPO KL/prior term (`beta` is retained as the CLI spelling).",
-        "Cosine similarity is a fit metric; it is not by itself evidence that the recovered structure is the ground truth.",
+        "Peak similarity is a fit metric; it is not by itself evidence that the recovered structure is the ground truth.",
     ])
     report_path.write_text("\n".join(lines) + "\n")
     print(f"Wrote run-level table: {rows_path}")

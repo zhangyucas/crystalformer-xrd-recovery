@@ -322,10 +322,19 @@ CPU-only `xrd` reward. For DNG reinforcement fine-tuning, simply omit the
 The Issue #68 XRD path keeps the pretrained CrystalFormer as the prior and
 uses a host-side, non-differentiable pymatgen simulator as the reward.  A
 candidate is expanded from `(G, L, XYZ, A, W)`, simulated with
-`XRDCalculator`, broadened onto a fixed `2theta` grid, and scored by cosine
-similarity.  XRD similarity is a maximize reward; the existing e-hull/property
+`XRDCalculator`, and scored by one-to-one peak matching. The scorer searches a
+global q-space scale and a small zero shift, then combines matched, missing,
+and extra peaks into a weighted F1 score. XRD similarity is a maximize reward;
+the existing e-hull/property
 rewards keep their original minimize convention.  The simulator never runs
 inside a JAX gradient transformation.
+
+The default peak settings were calibrated on 13 self-supervised crystal cases:
+height/prominence `0.08/0.05`, smoothing width `0.10` degrees, intrinsic peak
+width at least `0.05` degrees, minimum separation `0.15` degrees, at most `40`
+peaks, q-position tolerance `0.04`, global scale range `0.70-1.40`, and zero
+shift range `+-0.03` in q. These are deliberately modest defaults: weak noise is
+ignored, while missing and extra peaks still lower the score.
 
 Create a reproducible simulated target from a known CIF:
 
@@ -373,7 +382,7 @@ python issue68_xrd_recovery/scripts/xrd_recovery.py evaluate \
   --output experiments/xrd/results.csv
 ```
 
-The evaluation reports XRD similarity and `StructureMatcher` recovery
+The evaluation reports peak-matching similarity and `StructureMatcher` recovery
 separately; a high powder-pattern score alone is not a structure-identity
 claim.
 
@@ -400,7 +409,7 @@ python issue68_xrd_recovery/scripts/xrd_study.py summarize \
 ```
 
 `--tau` is an alias for the existing PPO `--beta` KL/prior coefficient. The
-study tool reports cosine-threshold recovery separately from
+study tool reports similarity-threshold recovery separately from
 `StructureMatcher`; with `--ground-truth`, each generated serial command also
 evaluates its candidate CIFs and records the matching metadata. It does not
 treat a good spectrum fit as proof of a ground-truth structure. `--seed` makes
@@ -422,7 +431,7 @@ Custom reward functions are implemented as Python factory functions that return 
 > [!CAUTION]
 > **Reward direction**: Legacy energy/property rewards use the historical
 > minimize convention. The XRD path explicitly sets `reward_direction="maximize"`
-> so a larger cosine similarity is better; do not negate the XRD score.
+> so a larger peak-matching similarity is better; do not negate the XRD score.
 
 Guidelines
 

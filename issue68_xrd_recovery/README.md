@@ -1,18 +1,16 @@
 # Issue #68: Powder XRD Recovery
 
-This directory contains the project-specific code, tests, reports, and
-experiment artifacts for QuantumBFS `quantum.harness` Issue #68. Reusable
-CrystalFormer implementation remains under `crystalformer/`, where it belongs
-to the installed Python package.
+This directory contains the project-specific code, tests, and experiment
+artifacts for QuantumBFS `quantum.harness` Issue #68. The current Chinese
+method report is kept at `../reports/DP_AND_PEAK_METHODS_REPORT_ZH.md`.
+Reusable CrystalFormer implementation remains under `crystalformer/`, where it
+belongs to the installed Python package.
 
 ## Directory layout
 
 ```text
 issue68_xrd_recovery/
 |-- README.md                 # Project map and usage
-|-- reports/
-|   |-- XRD_STUDY.md         # English experiment report
-|   `-- XRD_STUDY_ZH.md      # Chinese experiment report
 |-- scripts/
 |   |-- run_gpu_host.sh      # WSL host-side GPU bridge
 |   |-- run_memory_guard.py  # Process and WSL memory guard
@@ -31,7 +29,7 @@ issue68_xrd_recovery/
 The following files integrate the workflow into CrystalFormer and therefore
 remain in the main package instead of being duplicated here:
 
-- `crystalformer/reinforce/xrd.py`: XRD simulation and cosine reward.
+- `crystalformer/reinforce/xrd.py`: XRD simulation and scale-tolerant peak reward.
 - `crystalformer/reinforce/xrd_baseline.py`: random-move baseline.
 - `crystalformer/reinforce/ppo.py`: reward direction, replay, diversity, and
   gradient microbatching.
@@ -56,6 +54,6 @@ was organized; use paths relative to this directory for current access.
 
 ## Results
 
-- [Chinese report](reports/XRD_STUDY_ZH.md)
-- [English report](reports/XRD_STUDY.md)
-- [Final metrics](experiments/gpu_20260729/metrics/final_metrics.csv)
+- [Current Chinese method report](../reports/DP_AND_PEAK_METHODS_REPORT_ZH.md)
+- [Peak-score same-pool A/B data](../reports/XRD_SCORE_AB_SAME_POOL.csv)
+- [2400-candidate summary](experiments/real_xrd_peak_benchmark_20260801/combined_summary.csv)

@@ -20,9 +20,9 @@ from pymatgen.core import Structure
 from crystalformer.reinforce.xrd import (
     XRDConfig,
     config_dict,
-    cosine_similarity,
     make_xrd_reward_fn,
     make_two_theta_grid,
+    peak_match_similarity,
     save_pattern,
     simulate_structure_pattern,
     structure_from_GLXYZAW,
@@ -56,6 +56,8 @@ def _add_xrd_options(
     parser.add_argument("--profile", choices=["gaussian", "pseudo-voigt"], default=default)
     parser.add_argument("--fwhm", type=float, default=default)
     parser.add_argument("--eta", type=float, default=default)
+    parser.add_argument("--peak-smoothing", type=float, default=default)
+    parser.add_argument("--peak-min-width", type=float, default=default)
     parser.add_argument("--target-is-peaks", action="store_true", default=None if metadata_defaults else False)
 
 
@@ -72,6 +74,8 @@ def _config(args: argparse.Namespace, metadata: dict | None = None) -> XRDConfig
     profile = choose("profile", "gaussian")
     fwhm = choose("fwhm", 0.10)
     eta = choose("eta", 0.5)
+    peak_smoothing = choose("peak_smoothing", 0.10)
+    peak_min_width = choose("peak_min_width", 0.05)
     target_is_peaks = choose("target_is_peaks", metadata.get("target_is_peaks", False))
     return XRDConfig(
         wavelength=_wavelength(wavelength),
@@ -82,6 +86,8 @@ def _config(args: argparse.Namespace, metadata: dict | None = None) -> XRDConfig
         fwhm=float(fwhm),
         eta=float(eta),
         target_is_peaks=bool(_bool_or_none(target_is_peaks)),
+        peak_smoothing=float(peak_smoothing),
+        peak_min_width=float(peak_min_width),
     )
 
 
@@ -288,6 +294,8 @@ def evaluate_candidates(args: argparse.Namespace) -> None:
         "fwhm": config.fwhm,
         "eta": config.eta,
         "target_is_peaks": config.target_is_peaks,
+        "peak_smoothing": config.peak_smoothing,
+        "peak_min_width": config.peak_min_width,
     }
     if target_path.suffix.lower() in {".cif", ".json"}:
         _, batch_reward = make_xrd_reward_fn(target_structure=target_path, **xrd_kwargs)
@@ -312,7 +320,11 @@ def evaluate_candidates(args: argparse.Namespace) -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("w", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["rank", "path", "xrd_similarity", "structure_match", "formula", "num_sites", "error"])
+            writer.writerow([
+                "rank", "path", "xrd_similarity", "peak_scale", "peak_zero_shift",
+                "matched_peaks", "target_peaks", "candidate_peaks",
+                "structure_match", "formula", "num_sites", "error",
+            ])
         evaluation_summary = {
             "method": "crystalformer_ppo" if run_config.get("reward") == "xrd" else "candidate_evaluation",
             "target": str(target_path.resolve()),
@@ -343,6 +355,11 @@ def evaluate_candidates(args: argparse.Namespace) -> None:
         row = {
             "path": str(candidate_path),
             "xrd_similarity": 0.0,
+            "peak_scale": "",
+            "peak_zero_shift": "",
+            "matched_peaks": "",
+            "target_peaks": "",
+            "candidate_peaks": "",
             "structure_match": "",
             "formula": "",
             "num_sites": "",
@@ -356,7 +373,13 @@ def evaluate_candidates(args: argparse.Namespace) -> None:
                 config,
                 grid,
             )
-            row["xrd_similarity"] = cosine_similarity(curve, target_curve)
+            peak_match = peak_match_similarity(curve, target_curve, grid, config)
+            row["xrd_similarity"] = peak_match.score
+            row["peak_scale"] = peak_match.scale
+            row["peak_zero_shift"] = peak_match.zero_shift
+            row["matched_peaks"] = peak_match.matched_peaks
+            row["target_peaks"] = peak_match.target_peaks
+            row["candidate_peaks"] = peak_match.candidate_peaks
             row["formula"] = structure.composition.reduced_formula
             row["num_sites"] = len(structure)
             if matcher is not None:
@@ -482,6 +505,8 @@ def run_baseline(args: argparse.Namespace) -> None:
         "fwhm": config.fwhm,
         "eta": config.eta,
         "target_is_peaks": config.target_is_peaks,
+        "peak_smoothing": config.peak_smoothing,
+        "peak_min_width": config.peak_min_width,
     }
     if target_path.suffix.lower() in {".cif", ".json"}:
         _, batch_reward = make_xrd_reward_fn(target_structure=target_path, **xrd_kwargs)
@@ -492,7 +517,7 @@ def run_baseline(args: argparse.Namespace) -> None:
 
     def score(structure: Structure) -> float:
         _, curve = simulate_structure_pattern(structure, calculator, config, grid)
-        return cosine_similarity(curve, target_curve)
+        return peak_match_similarity(curve, target_curve, grid, config).score
 
     search_config = RandomMoveConfig(
         evaluations=args.evaluations,
@@ -548,7 +573,7 @@ def run_baseline(args: argparse.Namespace) -> None:
             args.plot,
         )
     print(f"Random-move evaluations: {result['evaluations']}")
-    print(f"Best cosine similarity: {result['best_score']:.6f}")
+    print(f"Best peak similarity: {result['best_score']:.6f}")
     if match is not None:
         print(f"StructureMatcher match: {match}")
     print(f"Wrote baseline outputs: {output_dir}")

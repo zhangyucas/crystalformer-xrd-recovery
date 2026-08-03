@@ -1,0 +1,13 @@
+case,formula,evaluated,cosine_oracle_rank,peak_oracle_rank,cosine_first_match_rank,peak_first_match_rank,cosine_top1_match,peak_top1_match
+1,Ti,201,78,3,78,2,false,false
+2,Zr,201,1,1,1,1,true,true
+3,NbS2,200,187,1,187,1,false,true
+4,CdS,200,1,1,1,1,true,true
+5,FeSe,201,1,1,1,1,true,true
+6,Sn,201,1,1,1,1,true,true
+7,Li2TeC2,192,34,9,34,9,false,false
+8,NaNiH3,201,1,1,1,1,true,true
+9,Ni(HO)2,201,1,1,1,1,true,true
+10,NaTiNbO3,201,1,1,1,1,true,true
+11,RuO2,201,1,1,1,1,true,true
+12,SrTiNbO3,201,1,1,1,1,true,true

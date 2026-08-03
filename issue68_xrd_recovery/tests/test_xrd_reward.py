@@ -2,13 +2,17 @@ import csv
 import json
 
 import numpy as np
+import pytest
 from pymatgen.core import Lattice, Structure
 
 from crystalformer.reinforce.xrd import (
     broaden_peaks,
     cosine_similarity,
+    extract_pattern_peaks,
     load_xrd_pattern,
     make_xrd_reward_fn,
+    peak_match_similarity,
+    XRDConfig,
     save_pattern,
     structure_from_GLXYZAW,
 )
@@ -39,10 +43,10 @@ def test_structure_conversion_and_self_similarity():
     np.testing.assert_allclose(np.asarray(scores), [1.0, 1.0], atol=1e-6)
 
 
-def test_different_lattice_has_lower_similarity():
+def test_reward_tolerates_global_lattice_scale_change():
     target = Structure(Lattice.cubic(3.5), ["Si"], [[0, 0, 0]])
     reward_fn, _ = make_xrd_reward_fn(target_structure=target, grid_step=0.2)
-    assert reward_fn(_p1_sample(lattice=4.2)) < 0.999
+    assert reward_fn(_p1_sample(lattice=4.2)) > 0.99
 
 
 def test_profiles_and_cosine_are_finite():
@@ -56,6 +60,91 @@ def test_profiles_and_cosine_are_finite():
     assert np.isfinite(pvoigt).all()
     assert cosine_similarity(gaussian, gaussian) == 1.0
     assert cosine_similarity(np.zeros_like(grid), gaussian) == 0.0
+
+
+def test_peak_score_tolerates_global_lattice_scale():
+    grid = np.linspace(5.0, 90.0, 1701)
+    config = XRDConfig(profile="pseudo-voigt", fwhm=0.5)
+    target = broaden_peaks(
+        [20.0, 32.0, 47.0, 65.0], [1.0, 0.7, 0.4, 0.2], grid,
+        profile=config.profile, fwhm=config.fwhm,
+    )
+    # A uniform q-space expansion represents a global lattice-scale error.
+    wavelength = 1.5406
+    q = 4 * np.pi * np.sin(np.deg2rad(np.array([20.0, 32.0, 47.0, 65.0]) / 2)) / wavelength
+    shifted_q = q / 1.12
+    shifted_theta = 2 * np.rad2deg(np.arcsin(shifted_q * wavelength / (4 * np.pi)))
+    candidate = broaden_peaks(
+        shifted_theta, [1.0, 0.7, 0.4, 0.2], grid,
+        profile=config.profile, fwhm=config.fwhm,
+    )
+    result = peak_match_similarity(candidate, target, grid, config)
+    assert result.score > 0.98
+    assert result.scale == pytest.approx(1.12, abs=0.02)
+
+
+def test_peak_score_penalizes_missing_and_extra_peaks():
+    grid = np.linspace(5.0, 90.0, 1701)
+    config = XRDConfig(profile="pseudo-voigt", fwhm=0.5)
+    target = broaden_peaks(
+        [20.0, 35.0, 50.0, 70.0], [1.0, 0.8, 0.6, 0.4], grid,
+        profile=config.profile, fwhm=config.fwhm,
+    )
+    exact = broaden_peaks(
+        [20.0, 35.0, 50.0, 70.0], [1.0, 0.8, 0.6, 0.4], grid,
+        profile=config.profile, fwhm=config.fwhm,
+    )
+    wrong = broaden_peaks(
+        [20.0, 35.0, 43.0, 58.0, 70.0, 82.0],
+        [1.0, 0.8, 0.7, 0.6, 0.4, 0.3], grid,
+        profile=config.profile, fwhm=config.fwhm,
+    )
+    exact_score = peak_match_similarity(exact, target, grid, config).score
+    wrong_score = peak_match_similarity(wrong, target, grid, config).score
+    assert exact_score > 0.99
+    assert wrong_score < exact_score - 0.2
+
+
+def test_peak_extraction_smoothing_removes_noise_spikes():
+    grid = np.linspace(5.0, 90.0, 1701)
+    clean = broaden_peaks([31.75, 45.5, 56.5, 66.3, 75.35, 84.05],
+                          [1.0, 0.66, 0.21, 0.09, 0.25, 0.18], grid,
+                          profile="pseudo-voigt", fwhm=0.5)
+    rng = np.random.default_rng(731)
+    noisy = clean + rng.normal(0.0, 0.02, grid.size)
+    noisy = np.maximum(noisy, 0.0)
+    config = XRDConfig(
+        grid_step=0.05,
+        profile="pseudo-voigt",
+        fwhm=0.5,
+        peak_smoothing=0.10,
+    )
+    unsmoothed = XRDConfig(**{**config.__dict__, "peak_smoothing": 0.0})
+    assert len(extract_pattern_peaks(grid, noisy, unsmoothed)[0]) > 6
+    assert len(extract_pattern_peaks(grid, noisy, config)[0]) == 6
+
+
+def test_peak_width_rejects_single_point_spike():
+    grid = np.linspace(5.0, 90.0, 1701)
+    curve = broaden_peaks([30.0], [1.0], grid, fwhm=0.5)
+    curve[np.argmin(np.abs(grid - 60.0))] = 1.0
+    config = XRDConfig(grid_step=0.05, peak_smoothing=0.10, peak_min_width=0.05)
+    positions, _ = extract_pattern_peaks(grid, curve, config)
+    np.testing.assert_allclose(positions, [30.0], atol=0.05)
+
+
+def test_weak_extra_peak_has_smaller_penalty_than_strong_extra_peak():
+    grid = np.linspace(5.0, 90.0, 1701)
+    config = XRDConfig(profile="pseudo-voigt", fwhm=0.5)
+    target = broaden_peaks([20.0, 40.0, 60.0], [1.0, 0.8, 0.6], grid,
+                           profile=config.profile, fwhm=config.fwhm)
+    weak_extra = broaden_peaks([20.0, 40.0, 60.0, 75.0], [1.0, 0.8, 0.6, 0.1], grid,
+                               profile=config.profile, fwhm=config.fwhm)
+    strong_extra = broaden_peaks([20.0, 40.0, 60.0, 75.0], [1.0, 0.8, 0.6, 1.0], grid,
+                                 profile=config.profile, fwhm=config.fwhm)
+    weak_score = peak_match_similarity(weak_extra, target, grid, config).score
+    strong_score = peak_match_similarity(strong_extra, target, grid, config).score
+    assert weak_score > strong_score
 
 
 def test_csv_target_and_score_output(tmp_path):

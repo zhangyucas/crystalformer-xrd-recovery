@@ -3,7 +3,7 @@
 The XRD calculator is deliberately kept outside JAX transformations.  Crystal
 Former supplies a batch of ``(G, L, XYZ, A, W)`` samples, this module expands
 one sample to a pymatgen structure, evaluates the black-box simulator, and
-returns a scalar cosine similarity.
+returns a scalar peak-matching score.
 """
 
 from __future__ import annotations
@@ -57,6 +57,16 @@ class XRDConfig:
     fwhm: float = 0.10
     eta: float = 0.5
     target_is_peaks: bool = False
+    peak_min_height: float = 0.08
+    peak_min_prominence: float = 0.05
+    peak_min_distance: float = 0.15
+    peak_smoothing: float = 0.10
+    peak_min_width: float = 0.05
+    peak_max_count: int = 40
+    peak_q_tolerance: float = 0.04
+    peak_scale_min: float = 0.70
+    peak_scale_max: float = 1.40
+    peak_zero_shift: float = 0.03
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.two_theta_min) or not np.isfinite(self.two_theta_max):
@@ -75,6 +85,20 @@ class XRDConfig:
             raise ValueError("eta must be in [0, 1]")
         if isinstance(self.wavelength, (int, float)) and not np.isfinite(self.wavelength):
             raise ValueError("numeric wavelength must be finite")
+        for name in ("peak_min_height", "peak_min_prominence"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]")
+        if self.peak_min_distance <= 0 or self.peak_q_tolerance <= 0:
+            raise ValueError("peak distance and q tolerance must be positive")
+        if self.peak_smoothing < 0 or self.peak_min_width < 0:
+            raise ValueError("peak smoothing and width must be non-negative")
+        if self.peak_max_count <= 0:
+            raise ValueError("peak_max_count must be positive")
+        if not 0 < self.peak_scale_min <= 1.0 <= self.peak_scale_max:
+            raise ValueError("peak scale range must contain 1.0")
+        if self.peak_zero_shift < 0:
+            raise ValueError("peak_zero_shift must be non-negative")
 
     @property
     def two_theta_range(self) -> tuple[float, float]:
@@ -202,6 +226,182 @@ def cosine_similarity(
     if np.isclose(value, 1.0, rtol=0.0, atol=1e-12):
         value = 1.0
     return float(np.clip(value, 0.0, 1.0)) if clip else value
+
+
+@dataclass(frozen=True)
+class PeakMatchResult:
+    """Peak-level score and the nuisance correction that produced it."""
+
+    score: float
+    scale: float
+    zero_shift: float
+    matched_peaks: int
+    target_peaks: int
+    candidate_peaks: int
+
+
+def extract_pattern_peaks(
+    grid: Sequence[float],
+    curve: Sequence[float],
+    config: XRDConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract a bounded set of robust local maxima from a sampled pattern."""
+
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.signal import find_peaks, peak_widths
+
+    grid = np.asarray(grid, dtype=np.float64).reshape(-1)
+    curve = np.asarray(curve, dtype=np.float64).reshape(-1)
+    if grid.size != curve.size:
+        raise ValueError("grid and curve must have the same length")
+    if grid.size < 3 or not np.any(curve > 0):
+        return np.empty(0), np.empty(0)
+    curve = np.maximum(np.nan_to_num(curve), 0.0)
+    step = float(np.median(np.diff(grid)))
+    detection_curve = curve
+    if config.peak_smoothing > 0:
+        sigma = max(config.peak_smoothing / max(step, 1e-12), 0.01)
+        detection_curve = gaussian_filter1d(
+            curve, sigma=sigma, mode="nearest", truncate=4.0
+        )
+    maximum = float(np.max(detection_curve))
+    minimum_distance = max(1, int(round(config.peak_min_distance / step)))
+    indices, properties = find_peaks(
+        detection_curve,
+        height=config.peak_min_height * maximum,
+        prominence=config.peak_min_prominence * maximum,
+        distance=minimum_distance,
+    )
+    if indices.size == 0:
+        return np.empty(0), np.empty(0)
+    intensities = np.asarray(properties["peak_heights"], dtype=np.float64)
+    measured_widths = peak_widths(detection_curve, indices, rel_height=0.5)[0] * step
+    smoothing_fwhm = 2.0 * math.sqrt(2.0 * math.log(2.0)) * config.peak_smoothing
+    intrinsic_widths = np.sqrt(np.maximum(measured_widths**2 - smoothing_fwhm**2, 0.0))
+    keep = intrinsic_widths >= config.peak_min_width
+    indices, intensities = indices[keep], intensities[keep]
+    if indices.size == 0:
+        return np.empty(0), np.empty(0)
+    if indices.size > config.peak_max_count:
+        keep = np.argsort(intensities)[-config.peak_max_count:]
+        indices, intensities = indices[keep], intensities[keep]
+    order = np.argsort(indices)
+    intensities = intensities[order] / max(float(np.max(intensities)), 1e-12)
+    return grid[indices[order]], intensities
+
+
+def _two_theta_to_q(two_theta: np.ndarray, wavelength: float) -> np.ndarray:
+    theta = np.deg2rad(np.asarray(two_theta, dtype=np.float64) / 2.0)
+    return 4.0 * np.pi * np.sin(theta) / wavelength
+
+
+def _greedy_peak_score(
+    target_q: np.ndarray,
+    target_weights: np.ndarray,
+    candidate_q: np.ndarray,
+    candidate_weights: np.ndarray,
+    tolerance: float,
+) -> tuple[float, int]:
+    """Match sorted peaks one-to-one and return a position-weighted F1."""
+
+    i = j = matched = 0
+    match_weight = 0.0
+    while i < target_q.size and j < candidate_q.size:
+        delta = candidate_q[j] - target_q[i]
+        if delta < -tolerance:
+            j += 1
+            continue
+        if delta > tolerance:
+            i += 1
+            continue
+        # Select the closer of the current and next candidate peak.
+        if j + 1 < candidate_q.size:
+            next_delta = candidate_q[j + 1] - target_q[i]
+            if abs(next_delta) < abs(delta) and abs(next_delta) <= tolerance:
+                j += 1
+                delta = next_delta
+        quality = math.exp(-0.5 * (delta / tolerance) ** 2)
+        match_weight += math.sqrt(target_weights[i] * candidate_weights[j]) * quality
+        matched += 1
+        i += 1
+        j += 1
+    precision = match_weight / max(float(np.sum(candidate_weights)), 1e-12)
+    recall = match_weight / max(float(np.sum(target_weights)), 1e-12)
+    if precision + recall <= 0:
+        return 0.0, 0
+    return float(2.0 * precision * recall / (precision + recall)), matched
+
+
+def peak_match_similarity(
+    predicted: Sequence[float],
+    target: Sequence[float],
+    grid: Sequence[float],
+    config: XRDConfig,
+) -> PeakMatchResult:
+    """Compare peak sets after correcting global lattice scale and zero shift."""
+
+    grid = np.asarray(grid, dtype=np.float64)
+    target_theta, target_intensity = extract_pattern_peaks(grid, target, config)
+    candidate_theta, candidate_intensity = extract_pattern_peaks(grid, predicted, config)
+    if target_theta.size == 0 or candidate_theta.size == 0:
+        return PeakMatchResult(0.0, 1.0, 0.0, 0, target_theta.size, candidate_theta.size)
+
+    wavelength = float(XRDCalculator(wavelength=config.wavelength).wavelength)
+    target_q = _two_theta_to_q(target_theta, wavelength)
+    candidate_q = _two_theta_to_q(candidate_theta, wavelength)
+    # Weak peaks remain useful evidence without carrying nearly the same weight
+    # as a strong, repeatable peak.
+    target_weights = np.sqrt(target_intensity)
+    candidate_weights = np.sqrt(candidate_intensity)
+
+    strongest_target = np.argsort(target_intensity)[-min(12, target_q.size):]
+    strongest_candidate = np.argsort(candidate_intensity)[-min(12, candidate_q.size):]
+    hypotheses = [1.0]
+    for ti in strongest_target:
+        for ci in strongest_candidate:
+            scale = target_q[ti] / candidate_q[ci]
+            if config.peak_scale_min <= scale <= config.peak_scale_max:
+                hypotheses.append(float(scale))
+
+    best = (0.0, 1.0, 0.0, 0)
+    coarse_offsets = np.linspace(
+        -config.peak_zero_shift, config.peak_zero_shift, 5
+    )
+    for scale in hypotheses:
+        for offset in coarse_offsets:
+            transformed = scale * candidate_q + offset
+            score, matched = _greedy_peak_score(
+                target_q, target_weights, transformed, candidate_weights,
+                config.peak_q_tolerance,
+            )
+            if score > best[0]:
+                best = (score, scale, float(offset), matched)
+
+    # A small local refinement avoids making the answer depend on coarse guesses.
+    _, best_scale, best_offset, _ = best
+    for scale in np.linspace(
+        max(config.peak_scale_min, best_scale - 0.01),
+        min(config.peak_scale_max, best_scale + 0.01),
+        21,
+    ):
+        for offset in np.linspace(
+            max(-config.peak_zero_shift, best_offset - 0.01),
+            min(config.peak_zero_shift, best_offset + 0.01),
+            9,
+        ):
+            transformed = scale * candidate_q + offset
+            score, matched = _greedy_peak_score(
+                target_q, target_weights, transformed, candidate_weights,
+                config.peak_q_tolerance,
+            )
+            if score > best[0]:
+                best = (score, float(scale), float(offset), matched)
+
+    score, scale, offset, matched = best
+    return PeakMatchResult(
+        float(np.clip(score, 0.0, 1.0)), scale, offset, matched,
+        int(target_q.size), int(candidate_q.size),
+    )
 
 
 def _symmetrize_atoms(g: Any, w: Any, x: Sequence[float]) -> np.ndarray:
@@ -475,12 +675,14 @@ def make_xrd_reward_fn(
     fwhm: float = 0.10,
     eta: float = 0.5,
     target_is_peaks: bool = False,
+    peak_smoothing: float = 0.10,
+    peak_min_width: float = 0.05,
     invalid_reward: float = 0.0,
     output_name: str = "xrd_scores",
 ):
-    """Build a pair of scalar and batched XRD similarity functions.
+    """Build a pair of scalar and batched peak-matching reward functions.
 
-    The scalar reward is the cosine similarity in ``[0, 1]``.  The batched
+    The scalar reward is a peak precision/recall score in ``[0, 1]``.  The batched
     function accepts the same optional ``path`` and ``epoch`` arguments as the
     existing conditional PPO rewards and executes entirely on the host.
     """
@@ -507,6 +709,8 @@ def make_xrd_reward_fn(
         fwhm=float(fwhm),
         eta=float(eta),
         target_is_peaks=bool(target_is_peaks),
+        peak_smoothing=float(peak_smoothing),
+        peak_min_width=float(peak_min_width),
     )
     grid = make_two_theta_grid(config.two_theta_range, config.grid_step)
     calculator = XRDCalculator(wavelength=config.wavelength)
@@ -526,7 +730,7 @@ def make_xrd_reward_fn(
 
     def _score_structure(structure: Structure) -> float:
         _, curve = simulate_structure_pattern(structure, calculator, config, grid)
-        return cosine_similarity(curve, target_curve)
+        return peak_match_similarity(curve, target_curve, grid, config).score
 
     def reward_fn(x: Sequence[Any]) -> float:
         try:
