@@ -173,6 +173,8 @@ def main():
     group.add_argument('--eps_clip', type=float, default=0.2, help='clip parameter for PPO')
     group.add_argument('--ehull_clip', type=float, default=20, help='clip parameter for ehull value')
     group.add_argument('--ppo_epochs', type=int, default=5, help='number of PPO epochs')
+    group.add_argument('--checkpoint_interval', '--checkpoint-interval', type=int, default=10,
+                       help='save a checkpoint every N outer epochs')
     group.add_argument('--mlff_model', type=str, default='orb-v3-conservative-inf-mpa', choices=['orb-v2', 'orb-v3-conservative-inf-mpa', 'orb-v3-direct-20-mpa', 'matgl'], help='the model to use for RL reward')
     group.add_argument('--mlff_path', type=str, default='/home/user_wanglei/private/datafile/crystalgpt/checkpoint/alex20/orb-v3-conservative-inf-mpa-20250404.ckpt', help='path to the MLFF model')
 
@@ -193,6 +195,8 @@ def main():
                        help='Lorentzian fraction for pseudo-Voigt profiles')
     group.add_argument('--xrd_target_is_peaks', action='store_true', default=None,
                        help='treat target CSV rows as discrete peaks before broadening')
+    group.add_argument('--xrd_score', '--xrd-score', choices=['peak', 'cosine'], default='peak',
+                       help='XRD PPO score: current peak matching or historical whole-curve cosine')
 
     group = parser.add_argument_group('loss parameters')
     group.add_argument("--lamb_a", type=float, default=1.0, help="weight for the a part")
@@ -210,6 +214,8 @@ def main():
 
     if args.epochs <= 0 or args.ppo_epochs <= 0 or args.batchsize <= 0:
         parser.error('--epochs, --ppo_epochs and --batchsize must be positive')
+    if args.checkpoint_interval <= 0:
+        parser.error('--checkpoint-interval must be positive')
     if args.sample_multiplier <= 0 or args.max_sampling_attempts <= 0:
         parser.error('--sample_multiplier and --max_sampling_attempts must be positive')
     if args.composition_max_atoms <= 0:
@@ -375,7 +381,7 @@ def main():
 
     print("\n========== Prepare logs ==========")
 
-    reward_tag = 'xrd' if args.reward == 'xrd' else args.mlff_model
+    reward_tag = f'xrd_{args.xrd_score}' if args.reward == 'xrd' else args.mlff_model
     effective_sg_temperature = args.temperature if args.sg_temperature is None else args.sg_temperature
     if args.optimizer != "none" or args.restore_path is None:
         output_name = "%s_%s_ppo_%d_a_%g_b_%g_c_%g_T_%g_" % (args.formula, reward_tag, args.ppo_epochs, args.alpha, args.beta, args.gamma, args.temperature) \
@@ -520,6 +526,7 @@ def main():
             fwhm=args.xrd_fwhm,
             eta=args.xrd_eta,
             target_is_peaks=args.xrd_target_is_peaks,
+            score_method=args.xrd_score,
         )
         reward_direction = "maximize"
         metric_name = "xrd"
@@ -576,6 +583,7 @@ def main():
         max_sampling_attempts=args.max_sampling_attempts,
         metric_name=metric_name,
         diversity_weight=args.diversity_weight,
+        checkpoint_interval=args.checkpoint_interval,
     )
 
 

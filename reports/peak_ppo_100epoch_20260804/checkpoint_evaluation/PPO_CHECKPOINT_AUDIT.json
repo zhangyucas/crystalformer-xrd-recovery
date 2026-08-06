@@ -1,0 +1,17 @@
+{
+  "base_runs": 12,
+  "base_samples": 1200,
+  "checkpoint_epochs": [
+    20,
+    50,
+    100
+  ],
+  "checkpoint_runs": 72,
+  "checkpoint_samples": 7200,
+  "errors_checkpoint": 184,
+  "formula_matches_checkpoint": 7200,
+  "samples_per_checkpoint": [
+    100
+  ],
+  "status": "complete"
+}

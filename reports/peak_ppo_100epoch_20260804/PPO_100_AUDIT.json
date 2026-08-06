@@ -1,0 +1,13 @@
+{
+  "checkpoints": 240,
+  "cifs_written": 18840,
+  "elapsed_seconds": 2189.1883405740004,
+  "epoch_rows": 2400,
+  "epochs_per_run": 100,
+  "min_available_gib": 3.082355499267578,
+  "min_swap_free_gib": 7.5972747802734375,
+  "runs": 24,
+  "status": "complete",
+  "training_candidates": 19200,
+  "zero_scores": 590
+}

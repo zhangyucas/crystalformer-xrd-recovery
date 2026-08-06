@@ -677,14 +677,15 @@ def make_xrd_reward_fn(
     target_is_peaks: bool = False,
     peak_smoothing: float = 0.10,
     peak_min_width: float = 0.05,
+    score_method: str = "peak",
     invalid_reward: float = 0.0,
     output_name: str = "xrd_scores",
 ):
-    """Build a pair of scalar and batched peak-matching reward functions.
+    """Build a pair of scalar and batched XRD reward functions.
 
-    The scalar reward is a peak precision/recall score in ``[0, 1]``.  The batched
-    function accepts the same optional ``path`` and ``epoch`` arguments as the
-    existing conditional PPO rewards and executes entirely on the host.
+    ``score_method="peak"`` uses the current peak precision/recall score;
+    ``"cosine"`` retains the historical whole-curve control.  The batched
+    function executes entirely on the host.
     """
 
     if target is not None and target_pattern is not None:
@@ -700,6 +701,8 @@ def make_xrd_reward_fn(
             pass
     if not np.isfinite(invalid_reward):
         raise ValueError("invalid_reward must be finite")
+    if score_method not in {"peak", "cosine"}:
+        raise ValueError("score_method must be 'peak' or 'cosine'")
     config = XRDConfig(
         wavelength=wavelength,
         two_theta_min=float(two_theta_range[0]),
@@ -730,6 +733,8 @@ def make_xrd_reward_fn(
 
     def _score_structure(structure: Structure) -> float:
         _, curve = simulate_structure_pattern(structure, calculator, config, grid)
+        if score_method == "cosine":
+            return cosine_similarity(curve, target_curve)
         return peak_match_similarity(curve, target_curve, grid, config).score
 
     def reward_fn(x: Sequence[Any]) -> float:

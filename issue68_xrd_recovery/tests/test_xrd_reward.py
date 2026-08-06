@@ -62,6 +62,17 @@ def test_profiles_and_cosine_are_finite():
     assert cosine_similarity(np.zeros_like(grid), gaussian) == 0.0
 
 
+def test_reward_factory_can_select_historical_cosine_control():
+    target = Structure(Lattice.cubic(3.5), ["Si"], [[0, 0, 0]])
+    peak_reward, _ = make_xrd_reward_fn(target_structure=target, grid_step=0.2)
+    cosine_reward, _ = make_xrd_reward_fn(
+        target_structure=target, grid_step=0.2, score_method="cosine"
+    )
+    sample = _p1_sample(lattice=4.2)
+    assert peak_reward(sample) > 0.99
+    assert cosine_reward(sample) < peak_reward(sample)
+
+
 def test_peak_score_tolerates_global_lattice_scale():
     grid = np.linspace(5.0, 90.0, 1701)
     config = XRDConfig(profile="pseudo-voigt", fwhm=0.5)

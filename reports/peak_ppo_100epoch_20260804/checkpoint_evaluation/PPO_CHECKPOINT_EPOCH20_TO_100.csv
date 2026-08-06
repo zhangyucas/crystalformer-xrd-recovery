@@ -1,0 +1,15 @@
+method,metric,comparison,pairs,mean_difference,std_difference,positive_pairs,negative_pairs,zero_pairs,exact_sign_flip_p_two_sided
+cosine,mean_peak_score,epoch100_minus_epoch20,12,0.0018498435693286481,0.0024534296440401303,9,3,0,0.0341796875
+cosine,mean_cosine_score,epoch100_minus_epoch20,12,0.004069880498455768,0.005840903467707971,9,3,0,0.04150390625
+cosine,structure_matches,epoch100_minus_epoch20,12,0.0,0.0,0,0,12,1.0
+cosine,valid_xrd,epoch100_minus_epoch20,12,0.16666666666666666,1.0671873729054748,4,4,4,0.796875
+cosine,formula_match_sampler,epoch100_minus_epoch20,12,0.0,0.0,0,0,12,1.0
+cosine,top10_peak_structure_matches,epoch100_minus_epoch20,12,0.0,0.0,0,0,12,1.0
+cosine,top10_cosine_structure_matches,epoch100_minus_epoch20,12,0.0,0.0,0,0,12,1.0
+peak,mean_peak_score,epoch100_minus_epoch20,12,0.0009225485131828665,0.007230517399250691,8,4,0,0.67919921875
+peak,mean_cosine_score,epoch100_minus_epoch20,12,-0.00031811271976174793,0.00537406996646548,8,4,0,0.85107421875
+peak,structure_matches,epoch100_minus_epoch20,12,-0.16666666666666666,1.4624940645653537,1,2,9,0.75
+peak,valid_xrd,epoch100_minus_epoch20,12,0.16666666666666666,1.2801909579781015,5,3,4,0.828125
+peak,formula_match_sampler,epoch100_minus_epoch20,12,0.0,0.0,0,0,12,1.0
+peak,top10_peak_structure_matches,epoch100_minus_epoch20,12,0.0,0.0,0,0,12,1.0
+peak,top10_cosine_structure_matches,epoch100_minus_epoch20,12,0.0,0.0,0,0,12,1.0

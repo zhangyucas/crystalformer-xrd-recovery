@@ -37,7 +37,11 @@ def load_data(filename):
     return data
 
 def save_data(data, filename):
-    with open(filename, "wb") as f:
+    temporary = filename + ".tmp"
+    with open(temporary, "wb") as f:
         pickle.dump(data, f)
-
-
+        f.flush()
+        os.fsync(f.fileno())
+        if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    os.replace(temporary, filename)

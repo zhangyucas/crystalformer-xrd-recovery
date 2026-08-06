@@ -164,6 +164,7 @@ def train(
     max_sampling_attempts=1000,
     metric_name="e",
     diversity_weight=0.0,
+    checkpoint_interval=10,
 ):
 
     if reward_direction not in {"minimize", "maximize"}:
@@ -178,6 +179,8 @@ def train(
         raise ValueError("max_sampling_attempts must be positive")
     if diversity_weight < 0:
         raise ValueError("diversity_weight must be non-negative")
+    if checkpoint_interval <= 0:
+        raise ValueError("checkpoint_interval must be positive")
 
     is_comp_provided = jnp.sum(composition) > 0
     num_devices = jax.local_device_count()
@@ -236,7 +239,12 @@ def train(
     f = open(log_filename, "w" if epoch_finished == 0 else "a", buffering=1, newline="\n")
     if os.path.getsize(log_filename) == 0:
         if is_comp_provided:
-            f.write(f"epoch {metric_name}_mean {metric_name}_err {metric_name}_max {metric_name}_min attempt unique_space_groups unique_wyckoff_sequences unique_atom_sequences unique_WA_combinations kl g w a xyz l\n")
+            f.write(
+                f"epoch {metric_name}_mean {metric_name}_err {metric_name}_max {metric_name}_min "
+                "reward_mean reward_err reward_max reward_min advantage_mean advantage_std "
+                "ppo_objective attempt unique_space_groups unique_wyckoff_sequences "
+                "unique_atom_sequences unique_WA_combinations log_ratio_to_reference g w a xyz l\n"
+            )
         else:
             f.write("epoch f_mean f_err f_max\n")
 
@@ -368,6 +376,12 @@ def train(
 
         baseline = rewards.mean() if epoch == epoch_finished+1 else 0.95 * baseline + 0.05 * rewards.mean()
         advantages = rewards - baseline
+        reward_mean = jnp.mean(rewards)
+        reward_err = jnp.std(rewards) / jnp.sqrt(batchsize)
+        reward_max = jnp.max(rewards)
+        reward_min = jnp.min(rewards)
+        advantage_mean = jnp.mean(advantages)
+        advantage_std = jnp.std(advantages)
 
         G, L, XYZ, A, W = x
         L = norm_lattice(G, W, L)
@@ -458,17 +472,31 @@ def train(
                     lambda *items: sum(items) / len(items), *micro_values
                 )
             ppo_loss, (kl_loss, entropy_g, entropy_w, entropy_a, entropy_xyz, entropy_l) = value
+
+        # PMAP retains a leading device axis for this scalar in the
+        # microbatch path; flatten it before writing the host-side log.
+        ppo_objective = jnp.ravel(ppo_loss)[0]
         
         if is_comp_provided:
-            f.write( ("%6d" + 4*"  %.6f" + 5*"  %3d" + 6*"  %.6f"+ "\n") % (epoch, metric_mean, metric_err, metric_max, metric_min, attempt, unique_space_groups, unique_wyckoff_sequences, unique_atom_sequences, unique_WA_combinations,
-                kl_loss[0], entropy_g[0], entropy_w[0], entropy_a[0], entropy_xyz[0], entropy_l[0]))
+            f.write(
+                ("%6d" + 11*"  %.6f" + 5*"  %3d" + 6*"  %.6f" + "\n")
+                % (
+                    epoch, metric_mean, metric_err, metric_max, metric_min,
+                    reward_mean, reward_err, reward_max, reward_min,
+                    advantage_mean, advantage_std, ppo_objective,
+                    attempt, unique_space_groups, unique_wyckoff_sequences,
+                    unique_atom_sequences, unique_WA_combinations,
+                    kl_loss[0], entropy_g[0], entropy_w[0], entropy_a[0],
+                    entropy_xyz[0], entropy_l[0],
+                )
+            )
         else:
             f.write( ("%6d" + 3*"  %.6f" +"\n") % (epoch, f_mean, f_err, jnp.max(rewards)) )
 
-        if epoch % 10 == 0 or epoch == epoch_finished + epochs:
-            ckpt = {"params": params,
-                    "opt_state" : opt_state
-                   }
+        if epoch % checkpoint_interval == 0 or epoch == epoch_finished + epochs:
+            # PPO evaluation only needs model parameters. Omitting Adam moments
+            # keeps checkpoint writes below the Windows/WSL commit limit.
+            ckpt = {"params": params}
             ckpt_filename = os.path.join(path, "epoch_%06d.pkl" %(epoch))
             checkpoint.save_data(ckpt, ckpt_filename)
             print("Save checkpoint file: %s" % ckpt_filename)

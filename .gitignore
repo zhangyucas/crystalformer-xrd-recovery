@@ -1,4 +1,7 @@
 *.png
+# Keep figures referenced by the final 100-epoch PPO report.
+!reports/peak_ppo_100epoch_20260804/*.png
+!reports/peak_ppo_100epoch_20260804/checkpoint_evaluation/*.png
 job*
 *.out
 __pycache__/
@@ -9,6 +12,9 @@ experimental/
 build/
 !imgs/*.png
 .vscode/
+
+# Superseded pilot PPO report; the final 100-epoch report is kept instead.
+reports/peak_ppo_20260803/
 
 # Issue #68 generated artifacts: checkpoints, JAX caches, raw samples, and runs.
 issue68_xrd_recovery/experiments/**
