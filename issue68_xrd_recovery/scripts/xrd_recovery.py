@@ -321,7 +321,8 @@ def evaluate_candidates(args: argparse.Namespace) -> None:
         with output.open("w", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow([
-                "rank", "path", "xrd_similarity", "peak_scale", "peak_zero_shift",
+                "rank", "path", "xrd_similarity", "raw_peak_score", "peak_scale",
+                "scale_penalty", "peak_zero_shift",
                 "matched_peaks", "target_peaks", "candidate_peaks",
                 "structure_match", "formula", "num_sites", "error",
             ])
@@ -355,7 +356,9 @@ def evaluate_candidates(args: argparse.Namespace) -> None:
         row = {
             "path": str(candidate_path),
             "xrd_similarity": 0.0,
+            "raw_peak_score": "",
             "peak_scale": "",
+            "scale_penalty": "",
             "peak_zero_shift": "",
             "matched_peaks": "",
             "target_peaks": "",
@@ -373,9 +376,17 @@ def evaluate_candidates(args: argparse.Namespace) -> None:
                 config,
                 grid,
             )
-            peak_match = peak_match_similarity(curve, target_curve, grid, config)
+            peak_match = peak_match_similarity(
+                curve,
+                target_curve,
+                grid,
+                config,
+                penalize_scale=args.score_method == "peak_penalized",
+            )
             row["xrd_similarity"] = peak_match.score
+            row["raw_peak_score"] = peak_match.raw_score
             row["peak_scale"] = peak_match.scale
+            row["scale_penalty"] = peak_match.scale_penalty
             row["peak_zero_shift"] = peak_match.zero_shift
             row["matched_peaks"] = peak_match.matched_peaks
             row["target_peaks"] = peak_match.target_peaks
@@ -408,6 +419,7 @@ def evaluate_candidates(args: argparse.Namespace) -> None:
     evaluation_summary = {
         "method": "crystalformer_ppo" if is_ppo_run else "candidate_evaluation",
         "target": str(target_path.resolve()),
+        "score_method": args.score_method,
         "evaluations": len(rows),
         "best_score": float(top_row["xrd_similarity"]),
         "structure_match": (
@@ -599,6 +611,9 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--output", required=True)
     evaluate.add_argument("--max-candidates", type=int, default=100)
     evaluate.add_argument("--top-k", type=int, default=5)
+    evaluate.add_argument(
+        "--score-method", choices=("peak", "peak_penalized"), default="peak"
+    )
     evaluate.add_argument("--plot", default=None, help="optional PNG path for target/top-candidate curves")
     _add_xrd_options(evaluate, metadata_defaults=True)
     evaluate.set_defaults(func=evaluate_candidates)

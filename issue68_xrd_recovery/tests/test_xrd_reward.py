@@ -12,6 +12,7 @@ from crystalformer.reinforce.xrd import (
     load_xrd_pattern,
     make_xrd_reward_fn,
     peak_match_similarity,
+    peak_scale_penalty,
     XRDConfig,
     save_pattern,
     structure_from_GLXYZAW,
@@ -92,6 +93,33 @@ def test_peak_score_tolerates_global_lattice_scale():
     result = peak_match_similarity(candidate, target, grid, config)
     assert result.score > 0.98
     assert result.scale == pytest.approx(1.12, abs=0.02)
+
+
+def test_scale_penalty_participates_in_alignment_selection():
+    grid = np.linspace(5.0, 90.0, 1701)
+    config = XRDConfig(profile="pseudo-voigt", fwhm=0.5)
+    target = broaden_peaks([20.0, 35.0, 50.0], [1.0, 0.8, 0.6], grid, fwhm=0.5)
+    candidate = broaden_peaks([14.5, 25.4, 36.2], [1.0, 0.8, 0.6], grid, fwhm=0.5)
+    raw = peak_match_similarity(candidate, target, grid, config)
+    penalized = peak_match_similarity(
+        candidate, target, grid, config, penalize_scale=True
+    )
+    assert raw.score > penalized.score
+    assert penalized.score == pytest.approx(
+        penalized.raw_score * penalized.scale_penalty, rel=1e-10
+    )
+    assert peak_scale_penalty(1.0) == pytest.approx(1.0)
+    assert peak_scale_penalty(1.37) < 0.1
+
+
+def test_reward_factory_exposes_scale_penalized_method():
+    target = Structure(Lattice.cubic(3.5), ["Si"], [[0, 0, 0]])
+    raw, _ = make_xrd_reward_fn(target_structure=target, grid_step=0.2)
+    penalized, _ = make_xrd_reward_fn(
+        target_structure=target, grid_step=0.2, score_method="peak_penalized"
+    )
+    sample = _p1_sample(lattice=4.2)
+    assert penalized(sample) < raw(sample)
 
 
 def test_peak_score_penalizes_missing_and_extra_peaks():
@@ -178,7 +206,7 @@ def test_csv_target_and_score_output(tmp_path):
     assert np.asarray(output).shape == (1,)
     with (tmp_path / "xrd_scores_3.csv").open() as handle:
         rows = list(csv.reader(handle))
-    assert rows[0] == ["sample", "xrd_similarity"]
+    assert rows[0][:2] == ["sample", "xrd_similarity"]
     assert len(rows) == 2
     assert (tmp_path / "xrd_scores_3_candidates" / "sample_0000.cif").is_file()
 

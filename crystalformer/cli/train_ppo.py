@@ -167,7 +167,8 @@ def main():
                        help='entropy/exploration weight (exploration_weight is the Issue #68 alias)')
     group.add_argument('--beta', '--tau', dest='beta', type=float, default=0.1,
                        help='KL/prior strength tau (beta is the historical option name)')
-    group.add_argument('--gamma', type=float, default=1.0, help='weight for experience buffer')
+    group.add_argument('--gamma', type=float, default=None,
+                       help='experience replay weight; defaults to 0 for XRD and 1 otherwise')
     group.add_argument('--diversity_weight', '--diversity-weight', type=float, default=0.0,
                        help='optional inverse-frequency bonus for distinct sampled (G,W,A) sequences')
     group.add_argument('--eps_clip', type=float, default=0.2, help='clip parameter for PPO')
@@ -175,6 +176,8 @@ def main():
     group.add_argument('--ppo_epochs', type=int, default=5, help='number of PPO epochs')
     group.add_argument('--checkpoint_interval', '--checkpoint-interval', type=int, default=10,
                        help='save a checkpoint every N outer epochs')
+    group.add_argument('--trainable_scope', '--trainable-scope', choices=['all', 'heads'], default='all',
+                       help='update all parameters or only the existing output-head modules')
     group.add_argument('--mlff_model', type=str, default='orb-v3-conservative-inf-mpa', choices=['orb-v2', 'orb-v3-conservative-inf-mpa', 'orb-v3-direct-20-mpa', 'matgl'], help='the model to use for RL reward')
     group.add_argument('--mlff_path', type=str, default='/home/user_wanglei/private/datafile/crystalgpt/checkpoint/alex20/orb-v3-conservative-inf-mpa-20250404.ckpt', help='path to the MLFF model')
 
@@ -195,8 +198,9 @@ def main():
                        help='Lorentzian fraction for pseudo-Voigt profiles')
     group.add_argument('--xrd_target_is_peaks', action='store_true', default=None,
                        help='treat target CSV rows as discrete peaks before broadening')
-    group.add_argument('--xrd_score', '--xrd-score', choices=['peak', 'cosine'], default='peak',
-                       help='XRD PPO score: current peak matching or historical whole-curve cosine')
+    group.add_argument('--xrd_score', '--xrd-score',
+                       choices=['peak', 'peak_penalized', 'cosine'], default='peak',
+                       help='XRD score: peak, scale-penalized peak, or historical cosine')
 
     group = parser.add_argument_group('loss parameters')
     group.add_argument("--lamb_a", type=float, default=1.0, help="weight for the a part")
@@ -211,6 +215,8 @@ def main():
     group.add_argument('--loss_type', type=str, default='mse', choices=['mse', 'mae'], help='loss type for the property reward')
 
     args = parser.parse_args()
+    if args.gamma is None:
+        args.gamma = 0.0 if args.reward == 'xrd' else 1.0
 
     if args.epochs <= 0 or args.ppo_epochs <= 0 or args.batchsize <= 0:
         parser.error('--epochs, --ppo_epochs and --batchsize must be positive')
@@ -584,6 +590,9 @@ def main():
         metric_name=metric_name,
         diversity_weight=args.diversity_weight,
         checkpoint_interval=args.checkpoint_interval,
+        standardize_raw_metric=args.reward == "xrd",
+        replay_weight=args.gamma,
+        trainable_scope=args.trainable_scope,
     )
 
 

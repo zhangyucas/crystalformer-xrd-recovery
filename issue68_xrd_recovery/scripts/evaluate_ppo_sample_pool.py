@@ -71,6 +71,9 @@ def main() -> None:
             "cif_written": int(cif_path.is_file()),
             "formula_match_cif": 0,
             "peak_score": 0.0,
+            "peak_penalized_score": 0.0,
+            "peak_scale": "",
+            "scale_penalty": "",
             "cosine_score": 0.0,
             "structure_match": 0,
             "num_sites": "",
@@ -89,7 +92,13 @@ def main() -> None:
             row["num_sites"] = len(structure)
             _, curve = simulate_structure_pattern(structure, calculator, config, grid)
             peak = peak_match_similarity(curve, target_curve, grid, config)
+            peak_penalized = peak_match_similarity(
+                curve, target_curve, grid, config, penalize_scale=True
+            )
             row["peak_score"] = peak.score
+            row["peak_penalized_score"] = peak_penalized.score
+            row["peak_scale"] = peak_penalized.scale
+            row["scale_penalty"] = peak_penalized.scale_penalty
             row["cosine_score"] = cosine_similarity(curve, target_curve)
             row["structure_match"] = int(matcher.fit(structure, ground_truth))
             row["matched_peaks"] = peak.matched_peaks
@@ -118,13 +127,27 @@ def main() -> None:
         "zero_peak_scores": sum(float(row["peak_score"]) == 0.0 for row in rows),
         "zero_cosine_scores": sum(float(row["cosine_score"]) == 0.0 for row in rows),
         "mean_peak_score": float(np.mean([row["peak_score"] for row in rows])),
+        "mean_peak_penalized_score": float(
+            np.mean([row["peak_penalized_score"] for row in rows])
+        ),
         "mean_cosine_score": float(np.mean([row["cosine_score"] for row in rows])),
         "best_peak_score": max(float(row["peak_score"]) for row in rows),
+        "best_peak_penalized_score": max(
+            float(row["peak_penalized_score"]) for row in rows
+        ),
         "best_cosine_score": max(float(row["cosine_score"]) for row in rows),
         "structure_matches": sum(row["structure_match"] for row in rows),
         "top10_peak_structure_matches": sum(
             row["structure_match"]
             for row in sorted(rows, key=lambda item: float(item["peak_score"]), reverse=True)[:10]
+        ),
+        "top10_peak_penalized_structure_matches": sum(
+            row["structure_match"]
+            for row in sorted(
+                rows,
+                key=lambda item: float(item["peak_penalized_score"]),
+                reverse=True,
+            )[:10]
         ),
         "top10_cosine_structure_matches": sum(
             row["structure_match"]

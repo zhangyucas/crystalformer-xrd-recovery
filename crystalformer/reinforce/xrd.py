@@ -238,6 +238,16 @@ class PeakMatchResult:
     matched_peaks: int
     target_peaks: int
     candidate_peaks: int
+    raw_score: float | None = None
+    scale_penalty: float = 1.0
+
+
+def peak_scale_penalty(scale: float, tolerance: float = 1.15) -> float:
+    """Return a smooth multiplicative prior favouring physical lattice scale."""
+
+    if scale <= 0 or tolerance <= 1.0:
+        raise ValueError("scale must be positive and tolerance must be greater than 1")
+    return float(math.exp(-0.5 * (math.log(scale) / math.log(tolerance)) ** 2))
 
 
 def extract_pattern_peaks(
@@ -337,6 +347,9 @@ def peak_match_similarity(
     target: Sequence[float],
     grid: Sequence[float],
     config: XRDConfig,
+    *,
+    penalize_scale: bool = False,
+    scale_tolerance: float = 1.15,
 ) -> PeakMatchResult:
     """Compare peak sets after correcting global lattice scale and zero shift."""
 
@@ -344,7 +357,10 @@ def peak_match_similarity(
     target_theta, target_intensity = extract_pattern_peaks(grid, target, config)
     candidate_theta, candidate_intensity = extract_pattern_peaks(grid, predicted, config)
     if target_theta.size == 0 or candidate_theta.size == 0:
-        return PeakMatchResult(0.0, 1.0, 0.0, 0, target_theta.size, candidate_theta.size)
+        return PeakMatchResult(
+            0.0, 1.0, 0.0, 0, target_theta.size, candidate_theta.size,
+            raw_score=0.0, scale_penalty=1.0,
+        )
 
     wavelength = float(XRDCalculator(wavelength=config.wavelength).wavelength)
     target_q = _two_theta_to_q(target_theta, wavelength)
@@ -363,7 +379,7 @@ def peak_match_similarity(
             if config.peak_scale_min <= scale <= config.peak_scale_max:
                 hypotheses.append(float(scale))
 
-    best = (0.0, 1.0, 0.0, 0)
+    best = (0.0, 0.0, 1.0, 0.0, 0)
     coarse_offsets = np.linspace(
         -config.peak_zero_shift, config.peak_zero_shift, 5
     )
@@ -374,11 +390,13 @@ def peak_match_similarity(
                 target_q, target_weights, transformed, candidate_weights,
                 config.peak_q_tolerance,
             )
-            if score > best[0]:
-                best = (score, scale, float(offset), matched)
+            penalty = peak_scale_penalty(scale, scale_tolerance) if penalize_scale else 1.0
+            objective = score * penalty
+            if objective > best[0]:
+                best = (objective, score, scale, float(offset), matched)
 
     # A small local refinement avoids making the answer depend on coarse guesses.
-    _, best_scale, best_offset, _ = best
+    _, _, best_scale, best_offset, _ = best
     for scale in np.linspace(
         max(config.peak_scale_min, best_scale - 0.01),
         min(config.peak_scale_max, best_scale + 0.01),
@@ -394,13 +412,18 @@ def peak_match_similarity(
                 target_q, target_weights, transformed, candidate_weights,
                 config.peak_q_tolerance,
             )
-            if score > best[0]:
-                best = (score, float(scale), float(offset), matched)
+            penalty = peak_scale_penalty(scale, scale_tolerance) if penalize_scale else 1.0
+            objective = score * penalty
+            if objective > best[0]:
+                best = (objective, score, float(scale), float(offset), matched)
 
-    score, scale, offset, matched = best
+    score, raw_score, scale, offset, matched = best
+    penalty = peak_scale_penalty(scale, scale_tolerance) if penalize_scale else 1.0
     return PeakMatchResult(
         float(np.clip(score, 0.0, 1.0)), scale, offset, matched,
         int(target_q.size), int(candidate_q.size),
+        raw_score=float(np.clip(raw_score, 0.0, 1.0)),
+        scale_penalty=penalty,
     )
 
 
@@ -684,8 +707,8 @@ def make_xrd_reward_fn(
     """Build a pair of scalar and batched XRD reward functions.
 
     ``score_method="peak"`` uses the current peak precision/recall score;
-    ``"cosine"`` retains the historical whole-curve control.  The batched
-    function executes entirely on the host.
+    ``"peak_penalized"`` jointly selects alignment using a smooth lattice-scale
+    prior; ``"cosine"`` retains the historical whole-curve control.
     """
 
     if target is not None and target_pattern is not None:
@@ -701,8 +724,8 @@ def make_xrd_reward_fn(
             pass
     if not np.isfinite(invalid_reward):
         raise ValueError("invalid_reward must be finite")
-    if score_method not in {"peak", "cosine"}:
-        raise ValueError("score_method must be 'peak' or 'cosine'")
+    if score_method not in {"peak", "peak_penalized", "cosine"}:
+        raise ValueError("score_method must be 'peak', 'peak_penalized' or 'cosine'")
     config = XRDConfig(
         wavelength=wavelength,
         two_theta_min=float(two_theta_range[0]),
@@ -731,15 +754,22 @@ def make_xrd_reward_fn(
     if not np.any(target_curve > 0):
         raise ValueError("target XRD pattern has no positive intensity on the configured grid")
 
-    def _score_structure(structure: Structure) -> float:
+    def _score_structure(structure: Structure) -> tuple[float, PeakMatchResult | None]:
         _, curve = simulate_structure_pattern(structure, calculator, config, grid)
         if score_method == "cosine":
-            return cosine_similarity(curve, target_curve)
-        return peak_match_similarity(curve, target_curve, grid, config).score
+            return cosine_similarity(curve, target_curve), None
+        result = peak_match_similarity(
+            curve,
+            target_curve,
+            grid,
+            config,
+            penalize_scale=score_method == "peak_penalized",
+        )
+        return result.score, result
 
     def reward_fn(x: Sequence[Any]) -> float:
         try:
-            return _score_structure(structure_from_GLXYZAW(*x))
+            return _score_structure(structure_from_GLXYZAW(*x))[0]
         except Exception:
             return float(invalid_reward)
 
@@ -755,6 +785,7 @@ def make_xrd_reward_fn(
             candidate_path = Path(path) / f"{output_name}_{epoch}_candidates"
             candidate_path.mkdir(parents=True, exist_ok=True)
         scores_list = []
+        diagnostics = []
         for index, sample in enumerate(zip(*host_x)):
             try:
                 structure = structure_from_GLXYZAW(*sample)
@@ -766,17 +797,33 @@ def make_xrd_reward_fn(
                         fmt="cif",
                         filename=str(candidate_path / f"sample_{index:04d}.cif"),
                     )
-                scores_list.append(_score_structure(structure))
+                score, peak_result = _score_structure(structure)
+                scores_list.append(score)
+                diagnostics.append(peak_result)
             except Exception:
                 scores_list.append(float(invalid_reward))
+                diagnostics.append(None)
         scores = np.asarray(scores_list, dtype=np.float32)
         if path is not None and epoch is not None:
             output_path = Path(path)
             output_path.mkdir(parents=True, exist_ok=True)
             with (output_path / f"{output_name}_{epoch}.csv").open("w", newline="") as handle:
                 writer = csv.writer(handle)
-                writer.writerow(("sample", "xrd_similarity"))
-                writer.writerows(enumerate(scores.tolist()))
+                writer.writerow((
+                    "sample", "xrd_similarity", "raw_peak_score", "peak_scale",
+                    "scale_penalty", "peak_zero_shift", "matched_peaks",
+                    "target_peaks", "candidate_peaks",
+                ))
+                for index, (score, result) in enumerate(zip(scores.tolist(), diagnostics)):
+                    if result is None:
+                        writer.writerow((index, score, "", "", "", "", "", "", ""))
+                    else:
+                        writer.writerow((
+                            index, score, result.raw_score, result.scale,
+                            result.scale_penalty, result.zero_shift,
+                            result.matched_peaks, result.target_peaks,
+                            result.candidate_peaks,
+                        ))
         # Returning a NumPy vector keeps the simulator independent of JAX.  The
         # PPO loop converts it to a JAX array after the host-side callback.
         return scores

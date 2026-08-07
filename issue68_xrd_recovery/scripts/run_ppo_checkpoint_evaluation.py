@@ -9,8 +9,10 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import time
+import pickle
 
 
 CASES = (
@@ -19,7 +21,7 @@ CASES = (
     ("Li2TeC2", "case_07_Li2TeC2", 9430),
     ("NaNiH3", "case_08_NaNiH3", 9440),
 )
-METHODS = ("cosine", "peak")
+METHODS = ("peak", "peak_penalized")
 SEED_OFFSETS = (1, 2, 3)
 
 
@@ -41,8 +43,10 @@ def _run(command: list[str], log_path: Path, timeout: float) -> int:
             return 124
 
 
-def _training_run(training_root: Path, case_dir: str, method: str, seed: int) -> Path:
-    base = training_root / "runs" / f"{case_dir}_{method}_seed{seed}"
+def _training_run(
+    training_root: Path, case_dir: str, method: str, seed: int, scope: str
+) -> Path:
+    base = training_root / "runs" / f"{case_dir}_{method}_{scope}_seed{seed}"
     matches = [path.parent for path in base.glob("*/data.txt")]
     if len(matches) != 1:
         raise RuntimeError(f"could not resolve exactly one training run: {base}")
@@ -55,10 +59,46 @@ def _write_manifest(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
+def _valid_pickle(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        with path.open("rb") as handle:
+            pickle.load(handle)
+    except Exception:
+        return False
+    return True
+
+
+def _complete_sampling_csv(path: Path, expected_rows: int) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        with path.open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        return (
+            len(rows) == expected_rows
+            and [int(row["sample_index"]) for row in rows]
+            == list(range(expected_rows))
+        )
+    except (KeyError, TypeError, ValueError, csv.Error):
+        return False
+
+
+def _valid_json(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        json.loads(path.read_text())
+    except Exception:
+        return False
+    return True
+
+
 def _parse_epochs(value: str) -> tuple[int, ...]:
     epochs = tuple(int(item) for item in value.split(",") if item.strip())
-    if not epochs or any(epoch <= 0 for epoch in epochs) or len(set(epochs)) != len(epochs):
-        raise argparse.ArgumentTypeError("epochs must be unique positive integers")
+    if not epochs or any(epoch < 0 for epoch in epochs) or len(set(epochs)) != len(epochs):
+        raise argparse.ArgumentTypeError("epochs must be unique non-negative integers")
     return epochs
 
 
@@ -66,9 +106,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--training-root", required=True)
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--checkpoint-epochs", type=_parse_epochs, default=(20, 50, 100))
+    parser.add_argument("--checkpoint-epochs", type=_parse_epochs, default=(0, 5, 25))
     parser.add_argument("--num-samples", type=int, default=100)
     parser.add_argument("--max-hours", type=float, default=8.0)
+    parser.add_argument("--trainable-scope", choices=("all", "heads"), default="heads")
+    parser.add_argument("--min-available-gib", type=float, default=1.5)
     args = parser.parse_args()
     if args.num_samples <= 0 or args.max_hours <= 0:
         parser.error("sample count and time limit must be positive")
@@ -82,6 +124,11 @@ def main() -> None:
     sampler = repo / "issue68_xrd_recovery/scripts/xrd_prior_sample.py"
     converter = repo / "issue68_xrd_recovery/scripts/xrd_recovery.py"
     evaluator = repo / "issue68_xrd_recovery/scripts/evaluate_ppo_sample_pool.py"
+    coverage = repo / "issue68_xrd_recovery/scripts/candidate_coverage.py"
+    base_checkpoint = (
+        repo / "issue68_xrd_recovery/experiments/gpu_20260729/checkpoints/"
+        "prior_params_epoch_010000.pkl"
+    )
     started = time.monotonic()
     deadline = started + args.max_hours * 3600
     manifest_path = output_root / "checkpoint_evaluation_manifest.json"
@@ -101,11 +148,12 @@ def main() -> None:
     for case_index, (formula, case_dir, test_seed_base) in enumerate(CASES, 1):
         target_dir = benchmark / case_dir
         for seed_offset in SEED_OFFSETS:
-            training_seed = 9500 + case_index * 10 + seed_offset
+            training_seed = 9700 + case_index * 10 + seed_offset
             test_seed = test_seed_base + seed_offset
             for method in METHODS:
                 training_run = _training_run(
-                    training_root, case_dir, method, training_seed
+                    training_root, case_dir, method, training_seed,
+                    args.trainable_scope,
                 )
                 for checkpoint_epoch in args.checkpoint_epochs:
                     run_id = (
@@ -114,10 +162,15 @@ def main() -> None:
                     )
                     run_output = output_root / "runs" / run_id
                     summary_path = run_output / "common_metrics.json"
-                    checkpoint = training_run / f"epoch_{10000 + checkpoint_epoch:06d}.pkl"
+                    coverage_path = run_output / "coverage.json"
+                    checkpoint = (
+                        base_checkpoint
+                        if checkpoint_epoch == 0
+                        else training_run / f"epoch_{10000 + checkpoint_epoch:06d}.pkl"
+                    )
                     if not checkpoint.is_file():
                         raise FileNotFoundError(checkpoint)
-                    if summary_path.is_file():
+                    if _valid_json(summary_path) and _valid_json(coverage_path):
                         manifest["runs"].append({
                             "run_id": run_id,
                             "formula": formula,
@@ -160,7 +213,8 @@ def main() -> None:
                             "--num-samples", str(args.num_samples), "--batch-size", "2",
                             "--seed", str(test_seed), "--platform", "gpu",
                             "--composition-max-atoms", "40", "--composition-size-bias", "0.5",
-                            "--min-available-gib", "3", "--min-swap-free-gib", "4",
+                            "--min-available-gib", str(args.min_available_gib),
+                            "--min-swap-free-gib", "4",
                         ],
                         [
                             "conda", "run", "-n", "crystal_wsl", "python", str(converter),
@@ -176,10 +230,27 @@ def main() -> None:
                             "--formula", formula, "--output",
                             str(run_output / "common_metrics.csv"),
                         ],
+                        [
+                            "conda", "run", "-n", "crystal_wsl", "python", str(coverage),
+                            "--target", str(target_dir / "ground_truth.cif"),
+                            "--candidates", str(cifs_dir), "--sampling-csv",
+                            str(run_output / "common_metrics.csv"), "--formula", formula,
+                            "--output", str(run_output / "coverage.csv"),
+                            "--selection-size", "30",
+                        ],
                     ]
-                    if (samples_dir / "prior_samples.csv").is_file():
+                    if params_checkpoint.exists() and not _valid_pickle(params_checkpoint):
+                        # Interrupted extraction can leave an empty/truncated output.
+                        params_checkpoint.unlink()
+                    sampling_csv = samples_dir / "prior_samples.csv"
+                    if samples_dir.exists() and not _complete_sampling_csv(
+                        sampling_csv, args.num_samples
+                    ):
+                        # Partial pools must be regenerated as one fixed-seed unit.
+                        shutil.rmtree(run_output)
+                    if _complete_sampling_csv(sampling_csv, args.num_samples):
                         commands = commands[2:]
-                    elif params_checkpoint.is_file():
+                    elif _valid_pickle(params_checkpoint):
                         commands = commands[1:]
                     run_output.mkdir(parents=True, exist_ok=True)
                     run_started = time.monotonic()
@@ -227,7 +298,14 @@ def main() -> None:
         summary = json.loads(
             (Path(record["output_dir"]) / "common_metrics.json").read_text()
         )
-        rows.append({**{key: record[key] for key in fields}, **summary})
+        coverage_summary = json.loads(
+            (Path(record["output_dir"]) / "coverage.json").read_text()
+        )
+        rows.append({
+            **{key: record[key] for key in fields},
+            **summary,
+            **{f"coverage_{key}": value for key, value in coverage_summary.items()},
+        })
     with (output_root / "CHECKPOINT_EVALUATION_SUMMARY.csv").open(
         "w", newline=""
     ) as handle:

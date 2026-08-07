@@ -9,6 +9,20 @@ from crystalformer.src.formula import find_composition_vector
 from crystalformer.src.lattice import norm_lattice
 
 
+INITIAL_HEAD_MODULE_NAMES = frozenset({"linear", "linear_1", "linear_2", "linear_3"})
+
+
+def _weighted_logp(logp_parts, lamb_g, lamb_w, lamb_xyz, lamb_a, lamb_l):
+    logp_g, logp_w, logp_xyz, logp_a, logp_l = logp_parts
+    return (
+        lamb_g * logp_g
+        + lamb_w * logp_w
+        + lamb_xyz * logp_xyz
+        + lamb_a * logp_a
+        + lamb_l * logp_l
+    )
+
+
 def make_ppo_loss_fn(logp_fn, eps_clip, beta=0.1, alpha=0.0, gamma=1.0, lamb_g=1.0, lamb_xyz=1.0,lamb_a=1.0, lamb_w=1.0, lamb_l=1.0):
 
     """
@@ -20,45 +34,72 @@ def make_ppo_loss_fn(logp_fn, eps_clip, beta=0.1, alpha=0.0, gamma=1.0, lamb_g=1
 
     def ppo_loss_fn(params, key, buffer, x, old_logp, pretrain_logp, advantages):
 
-        logp_g, logp_w, logp_xyz, logp_a, logp_l = logp_fn(params, key, *x, False)
-        logp = lamb_g*logp_g + lamb_w*logp_w + lamb_xyz *logp_xyz + lamb_a*logp_a + lamb_l*logp_l
-
-        logp_g_buffer, logp_w_buffer, logp_xyz_buffer, logp_a_buffer, logp_l_buffer = logp_fn(params, key, *buffer, False)
-        logp_buffer = lamb_g*logp_g_buffer + lamb_w*logp_w_buffer + lamb_xyz *logp_xyz_buffer + lamb_a*logp_a_buffer + lamb_l*logp_l_buffer
-            
-        kl_loss = logp - pretrain_logp  
-        advantages = advantages - beta * kl_loss - alpha * logp
+        logp_parts = logp_fn(params, key, *x, False)
+        logp_g, logp_w, logp_xyz, logp_a, logp_l = logp_parts
+        logp = _weighted_logp(
+            logp_parts, lamb_g, lamb_w, lamb_xyz, lamb_a, lamb_l
+        )
 
         # Finding the ratio (pi_theta / pi_theta__old)
-        ratios = jnp.exp(logp - old_logp)
+        log_ratio = logp - old_logp
+        ratios = jnp.exp(log_ratio)
 
         # Finding Surrogate Loss  
         surr1 = ratios * advantages
         surr2 = jax.lax.clamp(1-eps_clip, ratios, 1+eps_clip) * advantages
 
         # Final loss of clipped objective PPO
+        reference_log_ratio = logp - pretrain_logp
         ppo_loss = jnp.mean(jnp.minimum(surr1, surr2))
-        ppo_loss += gamma * jnp.mean(logp_buffer)
+        ppo_loss -= beta * jnp.mean(reference_log_ratio)
+        ppo_loss -= alpha * jnp.mean(logp)
+        if gamma > 0.0:
+            logp_buffer = _weighted_logp(
+                logp_fn(params, key, *buffer, False),
+                lamb_g, lamb_w, lamb_xyz, lamb_a, lamb_l,
+            )
+            ppo_loss += gamma * jnp.mean(logp_buffer)
 
-        return ppo_loss, (jnp.mean(kl_loss), -jnp.mean(logp_g), -jnp.mean(logp_w), -jnp.mean(logp_a), -jnp.mean(logp_xyz), -jnp.mean(logp_l))
+        clip_fraction = jnp.mean(jnp.abs(ratios - 1.0) > eps_clip)
+        approx_kl_old = jnp.mean((ratios - 1.0) - log_ratio)
+        diagnostics = (
+            jnp.mean(reference_log_ratio),
+            -jnp.mean(logp_g), -jnp.mean(logp_w), -jnp.mean(logp_a),
+            -jnp.mean(logp_xyz), -jnp.mean(logp_l),
+            clip_fraction, jnp.mean(ratios), jnp.max(ratios), approx_kl_old,
+        )
+        return ppo_loss, diagnostics
     
+    ppo_loss_fn.logp_weights = (lamb_g, lamb_w, lamb_xyz, lamb_a, lamb_l)
     return ppo_loss_fn
 
 
-def update_replay_buffer(exp_buffer, G, L, XYZ, A, W, rewards, batchsize):
-    """Update experience replay buffer with top-k samples based on rewards."""
+def update_replay_buffer(exp_buffer, G, L, XYZ, A, W, scores, batchsize, epoch=0):
+    """Keep top raw, direction-adjusted scores and their source epochs."""
     # Concatenate current batch with buffer for each component
     G_combined = jnp.concatenate([exp_buffer[0], G], axis=0)
     L_combined = jnp.concatenate([exp_buffer[1], L], axis=0)
     XYZ_combined = jnp.concatenate([exp_buffer[2], XYZ], axis=0)
     A_combined = jnp.concatenate([exp_buffer[3], A], axis=0)
     W_combined = jnp.concatenate([exp_buffer[4], W], axis=0)
-    rewards_combined = jnp.concatenate([exp_buffer[5], rewards], axis=0)
+    scores_combined = jnp.concatenate([exp_buffer[5], scores], axis=0)
+    old_epochs = (
+        exp_buffer[6]
+        if len(exp_buffer) > 6
+        else jnp.full(exp_buffer[5].shape, -1, dtype=jnp.int32)
+    )
+    epochs_combined = jnp.concatenate([
+        old_epochs,
+        jnp.full(scores.shape, epoch, dtype=jnp.int32),
+    ])
 
     # Keep top-k samples (descending sort by reward)
     # Keep at least one sample for low-memory smoke tests and tiny target runs.
     buffersize = max(1, batchsize // 10)
-    topk_idx = jnp.argsort(-rewards_combined)[:buffersize]
+    # Stable sorting prefers the newly concatenated record only when its raw
+    # score is genuinely better; a new record therefore cannot be lost because
+    # its historical-best-shifted reward happened to tie at zero.
+    topk_idx = jnp.argsort(-scores_combined, stable=True)[:buffersize]
 
     return (
         G_combined[topk_idx],
@@ -66,8 +107,50 @@ def update_replay_buffer(exp_buffer, G, L, XYZ, A, W, rewards, batchsize):
         XYZ_combined[topk_idx],
         A_combined[topk_idx],
         W_combined[topk_idx],
-        rewards_combined[topk_idx]
+        scores_combined[topk_idx],
+        epochs_combined[topk_idx],
     )
+
+
+def standardize_advantages(values, eps=1e-8):
+    """Return finite batch-standardized advantages."""
+
+    values = jnp.asarray(values)
+    if values.size == 0:
+        raise ValueError("values must contain at least one item")
+    centered = values - jnp.mean(values)
+    return centered / (jnp.std(values) + eps)
+
+
+def output_head_module_names(tree):
+    """Infer the shared final head without depending on Transformer depth."""
+
+    modules = set(tree.keys()) if hasattr(tree, "keys") else set()
+    numbered = [
+        (int(name.removeprefix("linear_")), name)
+        for name in modules
+        if name.startswith("linear_") and name.removeprefix("linear_").isdigit()
+    ]
+    final_head = max(numbered)[1] if numbered else None
+    return INITIAL_HEAD_MODULE_NAMES | ({final_head} if final_head else set())
+
+
+def mask_tree_for_trainable_scope(tree, scope, head_modules=None):
+    """Zero leaves outside the selected Haiku output-head modules."""
+
+    if scope == "all":
+        return tree
+    if scope != "heads":
+        raise ValueError("trainable scope must be 'all' or 'heads'")
+
+    if head_modules is None:
+        head_modules = output_head_module_names(tree)
+
+    def mask(path, leaf):
+        module = getattr(path[0], "key", None) if path else None
+        return leaf if module in head_modules else jnp.zeros_like(leaf)
+
+    return jax.tree_util.tree_map_with_path(mask, tree)
 
 
 def metric_to_rewards(metric, direction="minimize", global_extreme=None):
@@ -165,6 +248,9 @@ def train(
     metric_name="e",
     diversity_weight=0.0,
     checkpoint_interval=10,
+    standardize_raw_metric=False,
+    replay_weight=1.0,
+    trainable_scope="all",
 ):
 
     if reward_direction not in {"minimize", "maximize"}:
@@ -181,8 +267,13 @@ def train(
         raise ValueError("diversity_weight must be non-negative")
     if checkpoint_interval <= 0:
         raise ValueError("checkpoint_interval must be positive")
+    if replay_weight < 0:
+        raise ValueError("replay_weight must be non-negative")
+    if trainable_scope not in {"all", "heads"}:
+        raise ValueError("trainable_scope must be 'all' or 'heads'")
 
     is_comp_provided = jnp.sum(composition) > 0
+    trainable_head_modules = output_head_module_names(params)
     num_devices = jax.local_device_count()
     if batchsize < num_devices or batchsize % num_devices != 0:
         raise ValueError(
@@ -202,22 +293,37 @@ def train(
     print("sampling_batchsize: ", sampling_batchsize)
     print("ppo_microbatch_size: ", ppo_microbatch_size)
     print("is_comp_provided: ", is_comp_provided)
+    print("trainable_scope: ", trainable_scope)
+    if trainable_scope == "heads":
+        print("trainable_head_modules: ", sorted(trainable_head_modules))
 
-    @partial(jax.pmap, axis_name="p", in_axes=(None, None, None, None, 0, 0, 0, 0), out_axes=(None, None, 0),)
+    @partial(
+        jax.pmap,
+        axis_name="p",
+        in_axes=(None, None, None, None, 0, 0, 0, 0),
+        out_axes=(None, None, 0, None),
+    )
     def step(params, key, opt_state, buffer, x, old_logp, pretrain_logp, advantages):
         value, grad = jax.value_and_grad(ppo_loss_fn, has_aux=True)(params, key, buffer, x, old_logp, pretrain_logp, advantages)
         grad = jax.lax.pmean(grad, axis_name="p")
         value = jax.lax.pmean(value, axis_name="p")
         grad = jax.tree_util.tree_map(lambda g_: g_ * -1.0, grad)  # invert gradient for maximization
+        grad = mask_tree_for_trainable_scope(
+            grad, trainable_scope, trainable_head_modules
+        )
+        grad_norm = optax.global_norm(grad)
         updates, opt_state = optimizer.update(grad, opt_state, params)
+        updates = mask_tree_for_trainable_scope(
+            updates, trainable_scope, trainable_head_modules
+        )
         params = optax.apply_updates(params, updates)
-        return params, opt_state, value
+        return params, opt_state, value, grad_norm
 
     @partial(
         jax.pmap,
         axis_name="p",
         in_axes=(None, None, None, 0, 0, 0, 0),
-        out_axes=(None, 0),
+        out_axes=(None, 0, None),
     )
     def grad_step(params, key, buffer, x, old_logp, pretrain_logp, advantages):
         value, grad = jax.value_and_grad(ppo_loss_fn, has_aux=True)(
@@ -226,11 +332,17 @@ def train(
         grad = jax.lax.pmean(grad, axis_name="p")
         value = jax.lax.pmean(value, axis_name="p")
         grad = jax.tree_util.tree_map(lambda g_: g_ * -1.0, grad)
-        return grad, value
+        grad = mask_tree_for_trainable_scope(
+            grad, trainable_scope, trainable_head_modules
+        )
+        return grad, value, optax.global_norm(grad)
 
     @jax.jit
     def apply_grad(params, opt_state, grad):
         updates, opt_state = optimizer.update(grad, opt_state, params)
+        updates = mask_tree_for_trainable_scope(
+            updates, trainable_scope, trainable_head_modules
+        )
         params = optax.apply_updates(params, updates)
         return params, opt_state
 
@@ -243,12 +355,15 @@ def train(
                 f"epoch {metric_name}_mean {metric_name}_err {metric_name}_max {metric_name}_min "
                 "reward_mean reward_err reward_max reward_min advantage_mean advantage_std "
                 "ppo_objective attempt unique_space_groups unique_wyckoff_sequences "
-                "unique_atom_sequences unique_WA_combinations log_ratio_to_reference g w a xyz l\n"
+                "unique_atom_sequences unique_WA_combinations log_ratio_to_reference g w a xyz l "
+                "clip_fraction ratio_mean ratio_max approx_kl_old grad_norm "
+                "score_p10 score_p50 score_p90 replay_epoch replay_score\n"
             )
         else:
             f.write("epoch f_mean f_err f_max\n")
 
     pretrain_params = params
+    logp_weights = getattr(ppo_loss_fn, "logp_weights", (1.0,) * 5)
     logp_fn = jax.jit(logp_fn, static_argnums=8)
     
     global_metric_extreme = jnp.inf if reward_direction == "minimize" else -jnp.inf
@@ -356,9 +471,12 @@ def train(
             metric_mean = jnp.mean(metric)
             metric_err = jnp.std(metric) / jnp.sqrt(batchsize)
 
-            rewards, global_metric_extreme = metric_to_rewards(
-                metric, reward_direction, global_metric_extreme
-            )
+            if standardize_raw_metric:
+                rewards = metric if reward_direction == "maximize" else -metric
+            else:
+                rewards, global_metric_extreme = metric_to_rewards(
+                    metric, reward_direction, global_metric_extreme
+                )
         else:
             metric = jnp.asarray(batch_reward_fn(x))
             if reward_direction == "minimize":
@@ -371,11 +489,15 @@ def train(
             f_mean = jnp.mean(rewards)
             f_err = jnp.std(rewards) / jnp.sqrt(batchsize)
 
+        replay_scores = metric if reward_direction == "maximize" else -metric
         if diversity_weight > 0.0:
             rewards = rewards + diversity_weight * structural_diversity_bonus(G, W, A)
 
-        baseline = rewards.mean() if epoch == epoch_finished+1 else 0.95 * baseline + 0.05 * rewards.mean()
-        advantages = rewards - baseline
+        if standardize_raw_metric:
+            advantages = standardize_advantages(rewards)
+        else:
+            baseline = rewards.mean() if epoch == epoch_finished+1 else 0.95 * baseline + 0.05 * rewards.mean()
+            advantages = rewards - baseline
         reward_mean = jnp.mean(rewards)
         reward_err = jnp.std(rewards) / jnp.sqrt(batchsize)
         reward_max = jnp.max(rewards)
@@ -396,10 +518,14 @@ def train(
                 jnp.empty_like(XYZ[:0]),   # XYZ
                 jnp.empty_like(A[:0]),     # A
                 jnp.empty_like(W[:0]),     # W
-                jnp.empty((0,))            # rewards
+                jnp.empty((0,)),           # direction-adjusted raw scores
+                jnp.empty((0,), dtype=jnp.int32),
             )
 
-        exp_buffer = update_replay_buffer(exp_buffer, G, L, XYZ, A, W, rewards, batchsize)
+        if replay_weight > 0.0:
+            exp_buffer = update_replay_buffer(
+                exp_buffer, G, L, XYZ, A, W, replay_scores, batchsize, epoch
+            )
         buffer = exp_buffer[:5]
         # add composition information
         buffer = (composition[None, :].repeat(buffer[0].shape[0], axis=0),) + buffer
@@ -420,10 +546,16 @@ def train(
 
         key, subkey1, subkey2 = jax.random.split(key, 3)
         logp_g, logp_w, logp_xyz, logp_a, logp_l = evaluate_logp(params, subkey1)
-        old_logp = logp_g + logp_w + logp_xyz + logp_a + logp_l
+        old_logp = _weighted_logp(
+            (logp_g, logp_w, logp_xyz, logp_a, logp_l),
+            *logp_weights,
+        )
 
         logp_g, logp_w, logp_xyz, logp_a, logp_l = evaluate_logp(pretrain_params, subkey2)
-        pretrain_logp = logp_g + logp_w + logp_xyz + logp_a + logp_l
+        pretrain_logp = _weighted_logp(
+            (logp_g, logp_w, logp_xyz, logp_a, logp_l),
+            *logp_weights,
+        )
 
         x = jax.tree_util.tree_map(lambda _x: _x.reshape(shape_prefix + _x.shape[1:]), x)
         old_logp = old_logp.reshape(shape_prefix + old_logp.shape[1:])
@@ -433,7 +565,7 @@ def train(
         for _ in range(ppo_epochs):
             if micro_slices is None:
                 key, subkey = jax.random.split(key)
-                params, opt_state, value = step(
+                params, opt_state, value, grad_norm = step(
                     params, subkey, opt_state, buffer, x,
                     old_logp, pretrain_logp, advantages
                 )
@@ -445,7 +577,7 @@ def train(
                     micro_x = jax.tree_util.tree_map(
                         lambda item: item[:, start:stop], x
                     )
-                    grad, micro_value = grad_step(
+                    grad, micro_value, _ = grad_step(
                         params,
                         subkey,
                         buffer,
@@ -471,23 +603,44 @@ def train(
                 value = jax.tree_util.tree_map(
                     lambda *items: sum(items) / len(items), *micro_values
                 )
-            ppo_loss, (kl_loss, entropy_g, entropy_w, entropy_a, entropy_xyz, entropy_l) = value
+                # Preserve the largest observed ratio instead of averaging the
+                # per-microbatch maxima with the other scalar diagnostics.
+                value = (
+                    value[0],
+                    value[1][:8]
+                    + (jnp.max(jnp.stack([item[1][8] for item in micro_values])),)
+                    + value[1][9:],
+                )
+                grad_norm = optax.global_norm(accumulated_grad)
+            ppo_loss, diagnostics = value
+            (
+                reference_log_ratio, entropy_g, entropy_w, entropy_a,
+                entropy_xyz, entropy_l, clip_fraction, ratio_mean, ratio_max,
+                approx_kl_old,
+            ) = diagnostics
 
         # PMAP retains a leading device axis for this scalar in the
         # microbatch path; flatten it before writing the host-side log.
         ppo_objective = jnp.ravel(ppo_loss)[0]
         
         if is_comp_provided:
+            score_p10, score_p50, score_p90 = jnp.quantile(metric, jnp.array([0.1, 0.5, 0.9]))
+            replay_epoch = int(exp_buffer[6][0]) if exp_buffer[6].size else -1
+            replay_score = float(exp_buffer[5][0]) if exp_buffer[5].size else float("nan")
+            scalar = lambda value: float(jnp.ravel(value)[0])
             f.write(
-                ("%6d" + 11*"  %.6f" + 5*"  %3d" + 6*"  %.6f" + "\n")
+                ("%6d" + 11*"  %.6f" + 5*"  %3d" + 14*"  %.6f" + "  %6d  %.6f\n")
                 % (
                     epoch, metric_mean, metric_err, metric_max, metric_min,
                     reward_mean, reward_err, reward_max, reward_min,
                     advantage_mean, advantage_std, ppo_objective,
                     attempt, unique_space_groups, unique_wyckoff_sequences,
                     unique_atom_sequences, unique_WA_combinations,
-                    kl_loss[0], entropy_g[0], entropy_w[0], entropy_a[0],
-                    entropy_xyz[0], entropy_l[0],
+                    scalar(reference_log_ratio), scalar(entropy_g), scalar(entropy_w),
+                    scalar(entropy_a), scalar(entropy_xyz), scalar(entropy_l),
+                    scalar(clip_fraction), scalar(ratio_mean), scalar(ratio_max),
+                    scalar(approx_kl_old), scalar(grad_norm),
+                    score_p10, score_p50, score_p90, replay_epoch, replay_score,
                 )
             )
         else:
